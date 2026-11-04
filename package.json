@@ -1,0 +1,24 @@
+{
+  "name": "comick-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "login": "node --env-file-if-exists=.env dist/oauth.js",
+    "test": "npm run build && node --test test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  }
+}

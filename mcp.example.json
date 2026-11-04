@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "comick": {
+      "command": "node",
+      "args": [
+        "--env-file-if-exists=/home/xynogen/Project/Side/comick-mcp/.env",
+        "/home/xynogen/Project/Side/comick-mcp/dist/index.js"
+      ]
+    }
+  }
+}
