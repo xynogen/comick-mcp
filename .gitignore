@@ -1,8 +1,37 @@
+# Node.js — adapted from https://github.com/github/gitignore/blob/main/Node.gitignore
+# Logs and diagnostic reports
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime and coverage
+pids/
+*.pid
+*.pid.lock
+coverage/
+*.lcov
+.nyc_output/
+
+# Dependencies and build artifacts
 node_modules/
 dist/
+*.tsbuildinfo
+*.tgz
+
+# Local caches
+.npm/
+.eslintcache
+.node_repl_history
+
+# Local environment (keep the example tracked)
 .env
+.env.*
+!.env.example
+
+# Project-local state and test artifacts
 .comick/
 .test-*/
-
-# Pix Agent
 .pi/
