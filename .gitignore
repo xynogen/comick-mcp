@@ -3,3 +3,6 @@ dist/
 .env
 .comick/
 .test-*/
+
+# Pix Agent
+.pi/
