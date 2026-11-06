@@ -2,12 +2,15 @@
   "name": "comick-mcp",
   "version": "0.1.0",
   "private": true,
+  "bin": { "comick-mcp": "dist/index.js" },
+  "files": ["dist/"],
   "type": "module",
   "engines": {
     "node": ">=22.16"
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "login": "node --env-file-if-exists=.env dist/oauth.js",
     "ui": "node --env-file-if-exists=.env dist/ui.js",

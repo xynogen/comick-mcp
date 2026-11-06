@@ -1,11 +1,12 @@
 {
   "mcpServers": {
     "comick": {
-      "command": "node",
-      "args": [
-        "--env-file-if-exists=C:/Users/YOUR_USER/Projects/comick-mcp/.env",
-        "C:/Users/YOUR_USER/Projects/comick-mcp/dist/index.js"
-      ]
+      "command": "npx",
+      "args": ["-y", "github:xynogen/comick-mcp"],
+      "env": {
+        "COMICK_CLIENT_ID": "YOUR_PUBLIC_DESKTOP_APP_CLIENT_ID",
+        "COMICK_REDIRECT_URI": "http://127.0.0.1:8787/callback"
+      }
     }
   }
 }
