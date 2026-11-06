@@ -262,7 +262,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.headers.Authorization, 'Bearer access-old');
       return Response.json({ data: { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', description: 'OAuth description' } });
     };
-    const partial = await catalog.title({ slug: 'known-title', hid: 'KnownHid' });
+    const partial = await catalog.title({ slug: 'known-title', hid: 'KnownHid', detailed: true });
     assert.equal(partial.source, 'oauth_title');
     assert.equal(partial.partial, true);
     assert.ok(partial.missing_fields.includes('genres'));
@@ -296,6 +296,45 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     assert.equal(saved.data.continue_entry.number, 'Special');
     assert.equal(saved.data.rating, 8.5);
     assert.doesNotMatch(JSON.stringify(saved), /DO_NOT_FORWARD/);
+    assert.equal(saved.data.updated_at, undefined);
+    const complete = await catalog.libraryEntry({ hid: 'KnownHid', detailed: true });
+    assert.equal(complete.data.updated_at, entry.updated_at);
+    assert.ok(JSON.stringify(saved).length < JSON.stringify(complete).length);
+    const cursor = 'opaque+/=';
+    const rows = Array.from({ length: 7 }, (_, i) => ({ ...entry, hid: `Known${i}`, cover_url: null, country: 'cn',
+      translation_status: 'ongoing', titles: [{ title: `Alternative ${i}`, lang: 'en', is_default: true }] }));
+    globalThis.fetch = async url => {
+      assert.equal(url.pathname, '/integrations/v1/me/library');
+      assert.equal(url.searchParams.get('limit'), '5');
+      assert.equal(url.searchParams.has('detailed'), false);
+      assert.equal(url.searchParams.get('media_type'), 'manga');
+      assert.equal(url.searchParams.get('status'), '1');
+      const next = url.searchParams.get('cursor');
+      assert.ok(next === null || next === cursor);
+      return Response.json({ data: next ? rows.slice(5) : rows.slice(0, 5), next_cursor: next ? null : cursor });
+    };
+    const first = await catalog.library({ media_type: 'manga', status: 1 });
+    assert.equal(first.data.length, 5);
+    assert.deepEqual(Object.keys(first.data[0]).sort(), ['hid', 'media_type', 'progress', 'slug', 'status_name', 'title']);
+    const next = await catalog.library({ media_type: 'manga', status: 1, cursor: first.next_cursor });
+    assert.equal(next.next_cursor, null);
+    assert.deepEqual([...first.data, ...next.data].map(row => row.hid), rows.map(row => row.hid));
+    const fullPage = await catalog.library({ media_type: 'manga', status: 1, detailed: true });
+    assert.equal(fullPage.data[0].titles[0].title, 'Alternative 0');
+    assert.equal(fullPage.data[0].translation_status, 'ongoing');
+    assert.equal(fullPage.data[0].updated_at, entry.updated_at);
+    assert.ok(JSON.stringify(first).length < JSON.stringify(fullPage).length);
+    assert.doesNotMatch(JSON.stringify(fullPage), /DO_NOT_FORWARD/);
+    const publicProfile = { id: '12345678-1234-4123-8123-123456789abc', username: 'Reader', avatar_url: 'https://example.com/avatar' };
+    globalThis.fetch = async url => {
+      assert.equal(url.pathname, '/integrations/v1/me');
+      assert.equal(url.search, '');
+      return Response.json({ ...publicProfile, access_token: 'DO_NOT_FORWARD' });
+    };
+    assert.deepEqual(await catalog.me({}), { id: publicProfile.id, username: 'Reader' });
+    assert.deepEqual(await catalog.me({ detailed: true }), publicProfile);
+    globalThis.fetch = async () => Response.json({ data: [{ ...entry, progress: { ...entry.progress, number: 12 } }], next_cursor: null });
+    await assert.rejects(catalog.library({}), error => error.code === 'invalid_response');
     for (const invalid of [{ ...entry, hid: 'Wrong' }, { ...entry, progress: { ...entry.progress, number: 12 } },
       { ...entry, progress: { ...entry.progress, unit: 'episode' } }]) {
       globalThis.fetch = async () => Response.json({ data: invalid });
@@ -511,32 +550,45 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
     const compact = await search({ q: 'known' });
     assert.ok(searchOutput.safeParse(compact).success);
     assert.equal(compact.limit, 5);
-    assert.equal(compact.items[0].rating, 9.19);
-    assert.equal(compact.items[0].status, 'completed');
-    assert.deepEqual(Object.keys(compact.items[0]).sort(), ['hid', 'rating', 'slug', 'status', 'title']);
+    assert.deepEqual(Object.keys(compact.items[0]).sort(), ['hid', 'slug', 'title']);
     assert.equal(calls.length, 1);
-    assert.equal('unresolved_genre_ids' in compact.items[0], false);
     assert.ok(JSON.stringify(compact).length < JSON.stringify(page).length);
     assert.equal('synopsis' in (await search({ synopsis_limit: 0 })).items[0], false);
     assert.ok(calls.some(url => new URL(url).searchParams.get('limit') === '5'));
     const manyGenres = Array.from({ length: 12 }, (_, id) => ({ id, name: `Theme ${id}`, slug: `theme-${id}`, group: 'Theme' }));
     globalThis.fetch = async url => Response.json(url.pathname === '/genre/' ? manyGenres : [{ ...item, genres: manyGenres.map(value => value.id), desc: 'x'.repeat(500) }]);
+    const short = await search({});
+    assert.deepEqual(Object.keys(short.items[0]).sort(), ['hid', 'slug', 'title']);
     const bounded = await search({ detailed: true });
     assert.equal(bounded.items[0].genres.length, 12);
     assert.equal(bounded.items[0].synopsis_truncated, true);
     globalThis.fetch = async url => Response.json(url.pathname === '/genre/' ? genres : [item]);
-    assert.equal((await filters('genres')).items[0].name, 'Action');
+    assert.equal((await filters({ kind: 'genres' })).items[0].name, 'Action');
     globalThis.fetch = async () => Response.json([{ title: 'Level System', slug: 'level-system', id: 1, comic_count: 300 }]);
-    assert.deepEqual((await filters('tags')).items, [{ name: 'Level System', slug: 'level-system', group: null }]);
+    assert.deepEqual((await filters({ kind: 'tags' })).items, [{ name: 'Level System', slug: 'level-system', group: null }]);
+    globalThis.fetch = async () => Response.json(manyGenres);
+    const firstFilters = await filters({});
+    assert.equal(firstFilters.items.length, 5);
+    assert.equal(firstFilters.total, 12);
+    assert.equal(firstFilters.has_more, true);
+    const allFilters = [];
+    for (let page = 1; page <= 3; page++) allFilters.push(...(await filters({ page })).items);
+    assert.deepEqual(allFilters.map(item => item.slug), manyGenres.map(item => item.slug));
+    assert.deepEqual((await filters({ q: 'THEME-11' })).items.map(item => item.slug), ['theme-11']);
+    assert.equal((await filters({ page: 3 })).has_more, false);
+    assert.deepEqual((await filters({ q: 'missing' })).items, []);
 
     globalThis.fetch = async url => url.pathname === '/genre/' ? new Response(null, { status: 503 }) : Response.json([item]);
     const unresolved = await search({ detailed: true });
     assert.equal(unresolved.items.length, 1);
     assert.equal(unresolved.warnings.length, 1);
     assert.deepEqual(unresolved.items[0].unresolved_genre_ids, [5, 999]);
+    const unresolvedShort = await search({});
+    assert.deepEqual(unresolvedShort.warnings, []);
+    assert.equal(unresolvedShort.items[0].title, 'Display Title');
     for (const value of ['', '  ', 'not-a-number', null]) {
       globalThis.fetch = async () => Response.json([{ ...item, genres: [], bayesian_rating: value }]);
-      assert.equal((await search({})).items[0].rating, null);
+      assert.equal((await search({})).items[0].title, 'Display Title');
     }
     for (const invalid of [{ ...item, hid: '../bad' }, { ...item, media_type: 'anime' }, { ...item, title: '' }]) {
       globalThis.fetch = async () => Response.json([invalid]);
@@ -550,15 +602,44 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
       recommendations: Array.from({ length: 6 }, (_, i) => ({ relates: { hid: `rec${i}`, slug: `rec-${i}`, title: 'Related' }, total: 20 })) },
       authors: [{ name: 'Author', slug: 'author' }], artists: [], langList: ['en', 'id'] };
     globalThis.fetch = async () => Response.json(detail);
-    const full = await title({ slug: item.slug });
+    const brief = await title({ slug: item.slug });
+    assert.deepEqual(Object.keys(brief).filter(key => brief[key] !== undefined).sort(), ['genres', 'hid', 'partial', 'related', 'related_truncated', 'slug', 'synopsis', 'tags', 'title']);
+    assert.equal(brief.related_truncated, true);
+    assert.ok(Array.from(brief.synopsis).length <= 500);
+    assert.deepEqual(brief.genres, ['Action']);
+    assert.deepEqual(brief.tags, ['Level System']);
+    assert.equal(brief.related.length, 5);
+    assert.ok(brief.related.every(value => Object.keys(value).length === 3));
+    const full = await title({ slug: item.slug, detailed: true });
+    assert.ok(JSON.stringify(brief).length < JSON.stringify(full).length);
     assert.ok(titleOutput.safeParse(full).success);
     assert.equal(full.partial, false);
     assert.equal(full.source, 'catalog_detail');
-    assert.equal(full.recommendations.length, 5);
+    assert.equal(full.recommendations.length, 6);
     assert.equal(full.tags[0].slug, 'level-system');
     assert.ok(full.synopsis.includes('Other paragraph'));
     assert.equal(full.synopsis_truncated, false);
     assert.doesNotMatch(JSON.stringify(full), /private-contributor|script|reviews/);
+    const expandedDetail = { ...detail, comic: { ...detail.comic, desc: 'x'.repeat(700),
+      md_titles: Array.from({ length: 12 }, (_, i) => ({ title: `Alternative ${i}`, lang: 'en' })),
+      md_comic_md_genres: manyGenres.map(md_genres => ({ md_genres })),
+      mu_comic_categories: Array.from({ length: 7 }, (_, i) => ({ mu_categories: { title: `Tag ${i}`, slug: `tag-${i}` } })),
+    } };
+    globalThis.fetch = async () => Response.json(expandedDetail);
+    const preview = await title({ slug: item.slug });
+    assert.equal(preview.synopsis.length, 500);
+    assert.equal(preview.synopsis_truncated, true);
+    assert.equal(preview.genres.length, 8);
+    assert.equal(preview.genres_truncated, true);
+    assert.equal(preview.tags.length, 5);
+    assert.equal(preview.tags_truncated, true);
+    const expanded = await title({ slug: item.slug, detailed: true, synopsis_limit: 1000 });
+    assert.equal(expanded.synopsis.length, 700);
+    assert.equal(expanded.synopsis_truncated, false);
+    assert.equal(expanded.alternative_titles.length, 12);
+    assert.equal(expanded.genres.length, 12);
+    assert.equal(expanded.tags.length, 7);
+    assert.equal(expanded.recommendations.length, 6);
 
     for (const blocked of ['403', 'html']) {
       calls = [];
@@ -570,10 +651,12 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
       };
       const fallback = await title({ slug: item.slug });
       assert.equal(fallback.partial, true);
-      assert.equal(fallback.source, 'search');
-      assert.ok(fallback.missing_fields.includes('authors'));
+      assert.ok(fallback.warnings.some(value => /Public title details unavailable/.test(value)));
+      assert.equal('missing_fields' in fallback, false);
+      const fallbackFull = await title({ slug: item.slug, detailed: true });
+      assert.ok(fallbackFull.missing_fields.includes('authors'));
       assert.equal(fallback.hid, item.hid);
-      assert.equal(calls.filter(url => url.includes('/search/')).length, 1);
+      assert.equal(calls.filter(url => url.includes('/search/')).length, 2);
     }
     for (const wrong of [{ ...item, hid: 'wrong', slug: 'wrong-title' }, { ...item, media_type: 'anime' }]) {
       globalThis.fetch = async url => url.pathname.includes('/comic/') ? new Response(null, { status: 403 }) : Response.json([wrong]);
@@ -619,7 +702,7 @@ test('chapter paging, date order, language filters, reader links and safe failur
       assert.equal(options.credentials, 'omit');
       return Response.json({ chapters: [row, { ...row, hid: 'ZeroHid', chap: '0' }], total: 20, limit: 2 });
     };
-    const page = await chapters({ hid: 'TitleHid', slug: 'known-title', lang: 'en,pt-br,es-419', page: 2, limit: 2 });
+    const page = await chapters({ hid: 'TitleHid', slug: 'known-title', lang: 'en,pt-br,es-419', page: 2, limit: 2, detailed: true });
     assert.equal(count, 1);
     assert.equal(page.total, 20);
     assert.equal(page.order, 'newest_created_first');
@@ -629,10 +712,15 @@ test('chapter paging, date order, language filters, reader links and safe failur
     assert.equal(page.items[0].url, 'https://comick.dev/comic/known-title/ChapterHid');
     assert.equal(page.items[0].released_at, row.publish_at);
     assert.doesNotMatch(JSON.stringify(page), /DO_NOT_FORWARD|identities/);
-    globalThis.fetch = async () => Response.json({ chapters: [{ ...row, chap: 'Extra' }], total: 1, limit: 12 });
+    globalThis.fetch = async url => {
+      assert.equal(url.searchParams.get('limit'), '5');
+      assert.equal(url.searchParams.has('detailed'), false);
+      return Response.json({ chapters: [{ ...row, chap: 'Extra' }], total: 1, limit: 5 });
+    };
     const withoutSlug = await chapters({ hid: 'TitleHid' });
     assert.equal(withoutSlug.items[0].url, null);
     assert.equal(withoutSlug.items[0].number, 'Extra');
+    assert.deepEqual(Object.keys(withoutSlug.items[0]).sort(), ['hid', 'lang', 'number', 'title', 'url']);
     assert.equal(withoutSlug.warnings.length, 1);
     globalThis.fetch = async () => Response.json({ chapters: [], total: 0, limit: 12 });
     assert.equal((await chapters({ hid: 'TitleHid' })).items.length, 0);
@@ -668,7 +756,7 @@ test('real MCP stdio handshake, tool listing, validation and missing login', asy
     const disconnect = tools.find(tool => tool.name === 'comick_disconnect');
     assert.equal(disconnect.annotations.destructiveHint, true);
     assert.equal(disconnect.annotations.idempotentHint, true);
-    for (const name of ['comick_search', 'comick_title', 'comick_filters', 'comick_disconnect', 'comick_library_entry', 'comick_chapters']) assert.ok(tools.find(tool => tool.name === name).outputSchema);
+    for (const name of ['comick_search', 'comick_title', 'comick_filters', 'comick_disconnect', 'comick_library_entry', 'comick_chapters', 'comick_me', 'comick_library']) assert.ok(tools.find(tool => tool.name === name).outputSchema);
     assert.equal(tools.find(tool => tool.name === 'comick_connect').annotations.readOnlyHint, false);
     const connection = await client.callTool({ name: 'comick_connect', arguments: { action: 'start' } });
     assert.equal(connection.isError, true);
@@ -724,8 +812,12 @@ globalThis.fetch = async (url) => {
       assert.notEqual(response.isError, true);
       assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent);
       if (name === 'comick_search') {
-        assert.deepEqual(Object.keys(response.structuredContent.items[0]).sort(), ['hid', 'rating', 'slug', 'status', 'title']);
+        assert.deepEqual(Object.keys(response.structuredContent.items[0]).sort(), ['hid', 'slug', 'title']);
         assert.equal(response.structuredContent.limit, 5);
+      }
+      if (name === 'comick_title') {
+        assert.equal(response.structuredContent.related, undefined);
+        assert.equal(response.structuredContent.missing_fields, undefined);
       }
     }
     const failure = await client.callTool({ name: 'comick_search', arguments: { q: 'fail' } });

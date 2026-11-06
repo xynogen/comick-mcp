@@ -2,8 +2,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
-import { apiGet, ComickError, connect, disconnect, disconnectOutput } from './oauth.js';
-import { chapters, chaptersOutput, chaptersSchema, filters, filtersOutput, libraryEntry, libraryEntryOutput, libraryEntrySchema, search, searchOutput, searchSchema, title, titleOutput, titleSchema } from './catalog.js';
+import { ComickError, connect, disconnect, disconnectOutput } from './oauth.js';
+import { chapters, chaptersOutput, chaptersSchema, filters, filtersOutput, filtersSchema, library, libraryOutput, librarySchema, libraryEntry, libraryEntryResult, libraryEntrySchema, me, meOutput, meSchema, search, searchOutput, searchSchema, title, titleResult, titleSchema } from './catalog.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 
@@ -38,49 +38,44 @@ serveStdio(() => {
   }, () => result(disconnect));
 
   server.registerTool('comick_me', {
-    description: 'Read the connected Comick public profile. Use comick_connect to log in through the system browser first; never supply passwords, cookies or tokens to tools.',
-    inputSchema: z.object({}).strict(),
+    description: 'Read connected account ID and username. detailed=true also returns the avatar URL. Login through comick_connect; never supply passwords or tokens.',
+    inputSchema: meSchema, outputSchema: meOutput,
     annotations: readOnly,
-  }, () => result(() => apiGet('/me')));
+  }, query => result(() => me(query)));
 
   server.registerTool('comick_library', {
-    description: 'Read one page of the connected manga/anime library. Pass next_cursor unchanged with the same filters to get the next page. Status: 1 reading/watching, 2 completed, 3 on hold, 4 dropped, 5 planned. Progress numbers are strings, not integers.',
-    inputSchema: z.object({
-      media_type: z.enum(['manga', 'anime']).optional(),
-      status: z.number().int().min(1).max(5).optional(),
-      limit: z.number().int().min(1).max(100).default(50),
-      cursor: z.string().min(1).max(8192).optional(),
-    }).strict(),
+    description: 'Read a small library index (5 rows): identity, status and saved progress. Fetch comick_library_entry by HID for selected details, or detailed=true for full rows. Pass next_cursor unchanged with the same filters; null ends paging. Status: 1 reading/watching, 2 completed, 3 on hold, 4 dropped, 5 planned.',
+    inputSchema: librarySchema, outputSchema: libraryOutput,
     annotations: readOnly,
-  }, query => result(() => apiGet('/me/library', query)));
+  }, query => result(() => library(query)));
 
   server.registerTool('comick_library_entry', {
-    description: 'Read saved progress, Continue entry, reading/watching status and personal rating for one title HID in the connected library. Requires library:read. Progress numbers are strings and describe saved progress, not the next unread chapter. A 404 does not prove that a title exists or is unfollowed. No library-wide scan or write is performed.',
-    inputSchema: libraryEntrySchema, outputSchema: libraryEntryOutput, annotations: readOnly,
+    description: 'Read one library title HID: saved progress, Continue entry, status and personal rating. detailed=true adds dates and full row metadata. Progress numbers remain strings, not the next unread chapter. A 404 does not prove the title exists or is unfollowed. No write or library scan.',
+    inputSchema: libraryEntrySchema, outputSchema: libraryEntryResult, annotations: readOnly,
   }, query => result(() => libraryEntry(query)));
 
   server.registerTool('comick_chapters', {
-    description: 'List one page of manga chapters for a title HID without login, newest creation first (not highest chapter number). Returns release/update dates, language, groups and chapter numbers as strings. Supply the exact title slug from search for reader links. lang accepts comma-separated codes such as en,id or pt-br. Multiple releases of the same number are distinct; this is not an unread list, final chapter count, image downloader or anime episode tool.',
+    description: 'Read 5 manga chapters per page, newest-created first (not highest number): HID, number, title, language and reader URL. detailed=true adds volume, dates and groups. Supply exact title slug for links; lang accepts en,id or pt-br. Same-number releases remain distinct. Not an unread list or final chapter count.',
     inputSchema: chaptersSchema, outputSchema: chaptersOutput, annotations: readOnly,
   }, query => result(() => chapters(query)));
 
   server.registerTool('comick_search', {
-    description: 'Search public manga/manhwa/manhua (anime optional) without login. Default: an index of 5 matches with only HID, slug, title, rating and status; no synopsis or genre lookup. Use filters to narrow candidates, then call comick_title for only 1–2 selected matches. Keep detailed=false unless full metadata for every match is explicitly needed. Do not increase limit or fetch every title by default. For similar manga, search genre/theme slugs WITHOUT q. Filter matches, not similarity scores; one page, no total.',
+    description: 'Find titles with a small index: HID, slug and name only (5 by default). Fetch comick_title for a selected slug and HID to read genres, synopsis and related works. detailed=true expands every search result; avoid unless needed. One page, no total.',
     inputSchema: searchSchema,
     outputSchema: searchOutput,
     annotations: readOnly,
   }, query => result(() => search(query)));
 
   server.registerTool('comick_filters', {
-    description: 'List valid public genre/theme/format slugs or category tag slugs for comick_search. No login needed. Use genres for the genre list, tags for categories.',
-    inputSchema: z.object({ kind: z.enum(['genres', 'tags']).default('genres') }).strict(),
+    description: 'Find valid genre/theme/format or tag slugs for search. Match q against name/slug, or browse 5 per page. Use total and has_more to request more pages; no login.',
+    inputSchema: filtersSchema,
     outputSchema: filtersOutput,
     annotations: readOnly,
-  }, ({ kind }) => result(() => filters(kind)));
+  }, query => result(() => filters(query)));
 
   server.registerTool('comick_title', {
-    description: 'Read compact title details, genres, tags, languages and up to five community recommendations. Use the exact slug or HID from search; supply hid alongside slug for authenticated fallback. If public details are blocked, returns explicitly partial metadata only from a verified matching title. Never starts login automatically. For similar titles, search relevant genre/theme slugs without q; community votes are not similarity scores.',
-    inputSchema: titleSchema, outputSchema: titleOutput,
+    description: 'Read one selected title: short synopsis, genres/tags and up to 5 related works. Empty fields are omitted; partial/warnings flag unavailable public data. detailed=true returns full metadata and all available related works/alternative titles; increase synopsis_limit for more text. Supply slug and HID from search for authenticated fallback. Community recommendations are not similarity scores.',
+    inputSchema: titleSchema, outputSchema: titleResult,
     annotations: readOnly,
   }, query => result(() => title(query)));
 

@@ -25,7 +25,7 @@ export const searchSchema = z.object({
   media_type: z.enum(['manga', 'anime']).default('manga'),
   page: z.number().int().min(1).max(50).default(1),
   limit: z.number().int().min(1).max(50).default(5),
-  detailed: z.boolean().default(false).describe('Default is an index only: HID, slug, title, rating and status. Fetch comick_title for selected matches; true includes metadata for every match.'),
+  detailed: z.boolean().default(false).describe('Default returns only title, HID and slug; true returns metadata for every result.'),
   synopsis_limit: z.number().int().min(0).max(2000).default(180).describe('Synopsis excerpt length in detailed mode only; 0 omits synopsis text.'),
 }).strict().superRefine((query, context) => {
   for (const [lower, upper] of [['minimum', 'maximum'], ['from', 'to']] as const) {
@@ -95,25 +95,39 @@ const summary = z.object({
   translation_completed: z.boolean().nullable(), country: z.string().nullable(), year: z.number().int().nullable(),
   last_released_number: z.string().nullable(), content_rating: contentRating.nullable(), violence_rating: z.enum(['none', 'graphic']).nullable(),
 });
-const compactSummary = z.object({
-  hid, slug: identifier, title: label,
-  rating: z.number().min(0).max(10).nullable(),
-  status: z.enum(['ongoing', 'completed', 'cancelled', 'hiatus']).nullable(),
-});
+const compactSummary = z.object({ hid, slug: identifier, title: label });
 export const searchOutput = z.object({
-  items: z.array(z.union([compactSummary, summary])).max(50), page: z.number().int(), limit: z.number().int(), returned_count: z.number().int(), warnings: z.array(z.string()),
+  items: z.array(z.union([summary, compactSummary])).max(50), page: z.number().int(), limit: z.number().int(), returned_count: z.number().int(), warnings: z.array(z.string()),
 });
-export const filtersOutput = z.object({ items: z.array(genre), warnings: z.array(z.string()) });
+export const filtersSchema = z.object({
+  kind: z.enum(['genres', 'tags']).default('genres'),
+  q: z.string().trim().min(1).max(200).optional().describe('Match a name or slug; omit to browse.'),
+  page: z.number().int().min(1).max(10000).default(1),
+  limit: z.number().int().min(1).max(100).default(5),
+}).strict();
+export const filtersOutput = z.object({
+  items: z.array(genre).max(100), page: z.number().int(), limit: z.number().int(), total: z.number().int(), has_more: z.boolean(),
+});
 export const titleSchema = z.object({
   slug: identifier, hid: hid.optional(), media_type: mediaType.default('manga'),
-  synopsis_limit: z.number().int().min(100).max(10000).default(4000),
+  synopsis_limit: z.number().int().min(100).max(10000).default(500),
+  detailed: z.boolean().default(false).describe('True returns full metadata, alternative titles, and all available detail fields.'),
 }).strict();
 export const titleOutput = summary.extend({
-  alternative_titles: z.array(z.object({ title: label, lang: z.string().nullable() })).max(10),
+  alternative_titles: z.array(z.object({ title: label, lang: z.string().nullable() })),
   authors: z.array(person), artists: z.array(person), languages: z.array(z.string()), tags: z.array(tag),
-  recommendations: z.array(z.object({ hid, slug: identifier, title: label, url: z.string().url(), votes: z.number().nullable() })).max(5),
+  recommendations: z.array(z.object({ hid, slug: identifier, title: label, url: z.string().url(), votes: z.number().nullable() })),
   partial: z.boolean(), source: z.enum(['catalog_detail', 'oauth_title', 'search']), missing_fields: z.array(z.string()), warnings: z.array(z.string()),
 });
+const compactTitle = z.object({
+  hid, slug: identifier, title: label,
+  synopsis: z.string().optional(), synopsis_truncated: z.literal(true).optional(),
+  genres: z.array(label).max(8).optional(), tags: z.array(label).max(5).optional(),
+  genres_truncated: z.literal(true).optional(), tags_truncated: z.literal(true).optional(),
+  related: z.array(z.object({ hid, slug: identifier, title: label })).max(5).optional(), related_truncated: z.literal(true).optional(),
+  partial: z.boolean(), warnings: z.array(z.string()).optional(),
+});
+export const titleResult = z.union([titleOutput, compactTitle]);
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -151,10 +165,15 @@ async function genreList(): Promise<GenreWithId[]> {
   return parse(z.array(genreWithId), await catalogGet('/genre/'));
 }
 
-export async function filters(kind: 'genres' | 'tags') {
-  if (kind === 'genres') return parse(filtersOutput, { items: await genreList(), warnings: [] });
-  const items = parse(z.array(z.object({ title: label, slug: identifier })), await catalogGet('/category/'));
-  return parse(filtersOutput, { items: items.map(item => ({ name: item.title, slug: item.slug, group: null })), warnings: [] });
+export async function filters(input: z.input<typeof filtersSchema>) {
+  const { kind, q, page, limit } = filtersSchema.parse(input);
+  const items = kind === 'genres' ? await genreList()
+    : parse(z.array(z.object({ title: label, slug: identifier })), await catalogGet('/category/'))
+      .map(item => ({ name: item.title, slug: item.slug, group: null }));
+  const matching = q ? items.filter(item => `${item.name} ${item.slug}`.toLowerCase().includes(q.toLowerCase())) : items;
+  return parse(filtersOutput, {
+    items: matching.slice((page - 1) * limit, page * limit), page, limit, total: matching.length, has_more: page * limit < matching.length,
+  });
 }
 
 async function resolveGenres(items: RawTitle[], warnings: string[]) {
@@ -171,9 +190,10 @@ export async function search(input: z.input<typeof searchSchema>) {
   const genres = detailed ? await resolveGenres(items, warnings) : [];
   return parse(searchOutput, {
     items: items.map(item => {
-      const data = summarize(item, query.media_type, detailed ? synopsis_limit : 0, genres);
-      if (detailed) return data;
-      return { hid: data.hid, slug: data.slug, title: data.title, rating: data.rating.site_score, status: data.publication_status?.name ?? null };
+      if (!detailed) return parse(compactSummary, {
+        hid: item.hid, slug: item.slug, title: summarize(item, query.media_type, 0).title,
+      });
+      return summarize(item, query.media_type, synopsis_limit, genres);
     }),
     page: query.page, limit: query.limit, returned_count: items.length, warnings,
   });
@@ -224,11 +244,11 @@ export async function title(input: z.input<typeof titleSchema>) {
     ...(data.synopsis === null ? ['synopsis'] : []),
     ...(data.unresolved_genre_ids.length ? ['genre_names'] : []),
   ];
-  return parse(titleOutput, {
-    ...data, alternative_titles: (item.md_titles ?? item.titles ?? []).slice(0, 10).map(value => ({ title: value.title, lang: value.lang })),
+  const full = parse(titleOutput, {
+    ...data, alternative_titles: (item.md_titles ?? item.titles ?? []).map(value => ({ title: value.title, lang: value.lang })),
     authors: detail.authors ?? [], artists: detail.artists ?? [], languages: detail.langList ?? [],
     tags: (item.mu_comic_categories ?? []).map(value => ({ name: value.mu_categories.title, slug: value.mu_categories.slug })),
-    recommendations: (item.recommendations ?? []).slice(0, 5).map(value => {
+    recommendations: (item.recommendations ?? []).map(value => {
       const related = value.relates;
       const type = related.media_type ?? query.media_type;
       return { hid: related.hid, slug: related.slug, title: related.md_titles?.find(title => title.is_default && title.lang === 'en')?.title ?? related.title,
@@ -236,9 +256,21 @@ export async function title(input: z.input<typeof titleSchema>) {
     }),
     partial: source !== 'catalog_detail', source, missing_fields: missing, warnings,
   });
+  if (query.detailed) return full;
+  const relevant = full.genres.filter(value => !['format', 'demographic'].includes(value.group?.toLowerCase() ?? ''));
+  return parse(compactTitle, {
+    hid: full.hid, slug: full.slug, title: full.title,
+    synopsis: full.synopsis ?? undefined, synopsis_truncated: full.synopsis_truncated || undefined,
+    genres: relevant.length ? relevant.slice(0, 8).map(value => value.name) : undefined,
+    tags: full.tags.length ? full.tags.slice(0, 5).map(value => value.name) : undefined,
+    related: full.recommendations.length ? full.recommendations.slice(0, 5).map(({ hid, slug, title }) => ({ hid, slug, title })) : undefined,
+    genres_truncated: relevant.length > 8 || undefined, tags_truncated: full.tags.length > 5 || undefined,
+    related_truncated: full.recommendations.length > 5 || undefined,
+    partial: full.partial, warnings: full.warnings.length ? full.warnings : undefined,
+  });
 }
 
-export const libraryEntrySchema = z.object({ hid }).strict();
+export const libraryEntrySchema = z.object({ hid, detailed: z.boolean().default(false) }).strict();
 const progress = z.object({
   unit: z.enum(['chapter', 'episode']), hid: hid.nullable(), number: z.string().nullable(), volume: z.string().nullable(),
 });
@@ -253,11 +285,44 @@ export const libraryEntryOutput = z.object({ data: z.object({
   total_units: z.number().int().nonnegative().nullable(),
   followed_at: z.string().datetime({ offset: true }), updated_at: z.string().datetime({ offset: true }),
   progressed_at: z.string().datetime({ offset: true }).nullable(), last_released_at: z.string().datetime({ offset: true }).nullable(),
+  cover_url: z.string().url().nullable().optional(), country: z.string().nullable().optional(),
+  translation_status: z.enum(['ongoing', 'completed', 'dropped', 'inactive']).nullable().optional(),
+  titles: z.array(z.object({ title: label, lang: z.string().nullable(), is_default: z.boolean().optional() })).optional(),
   url: z.string().url(),
 }) });
+const compactEntry = libraryEntryOutput.shape.data.pick({
+  hid: true, slug: true, title: true, media_type: true, status_name: true,
+  progress: true, continue_entry: true, rating: true, last_released_number: true, total_units: true,
+});
+export const libraryEntryResult = z.object({ data: z.union([libraryEntryOutput.shape.data, compactEntry]) });
+export const librarySchema = z.object({
+  media_type: mediaType.optional(), status: z.number().int().min(1).max(5).optional(),
+  limit: z.number().int().min(1).max(100).default(5), cursor: z.string().min(1).max(8192).optional(),
+  detailed: z.boolean().default(false).describe('Full row metadata; otherwise use comick_library_entry for one selected HID.'),
+}).strict();
+const libraryIndex = compactEntry.pick({ hid: true, slug: true, title: true, media_type: true, status_name: true, progress: true });
+export const libraryOutput = z.object({
+  data: z.array(z.union([libraryEntryOutput.shape.data, libraryIndex])).max(100), next_cursor: z.string().nullable(),
+});
+export async function library(input: z.input<typeof librarySchema>) {
+  const { detailed, ...query } = librarySchema.parse(input);
+  const response = parse(z.object({ data: z.array(libraryEntryOutput.shape.data).max(query.limit), next_cursor: z.string().nullable() }), await apiGet('/me/library', query));
+  if (response.data.some(item => [item.progress, item.continue_entry].some(value => value && value.unit !== (item.media_type === 'manga' ? 'chapter' : 'episode')))) {
+    throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
+  }
+  return parse(libraryOutput, { ...response, data: detailed ? response.data : response.data.map(item => libraryIndex.parse(item)) });
+}
+export const meSchema = z.object({ detailed: z.boolean().default(false) }).strict();
+const profile = z.object({ id: z.string().uuid(), username: z.string().nullable(), avatar_url: z.string().url().nullable() });
+export const meOutput = profile.omit({ avatar_url: true }).extend({ avatar_url: z.string().url().nullable().optional() });
+export async function me(input: z.input<typeof meSchema>) {
+  const { detailed } = meSchema.parse(input);
+  const result = parse(profile, await apiGet('/me'));
+  return detailed ? result : { id: result.id, username: result.username };
+}
 
 export async function libraryEntry(input: z.input<typeof libraryEntrySchema>) {
-  const { hid } = libraryEntrySchema.parse(input);
+  const { hid, detailed } = libraryEntrySchema.parse(input);
   let response: unknown;
   try { response = await apiGet(`/me/library/${encodeURIComponent(hid)}`); }
   catch (error) {
@@ -272,7 +337,7 @@ export async function libraryEntry(input: z.input<typeof libraryEntrySchema>) {
   if ([result.data.progress, result.data.continue_entry].some(value => value && value.unit !== unit)) {
     throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
   }
-  return result;
+  return { data: detailed ? result.data : compactEntry.parse(result.data) };
 }
 
 export const chaptersSchema = z.object({
@@ -281,7 +346,8 @@ export const chaptersSchema = z.object({
   lang: z.string().min(2).max(100).regex(/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*(?:,[a-z]{2,3}(?:-[a-z0-9]{2,8})*)*$/).optional()
     .describe('Language codes, comma-separated, for example en,id or pt-br. Omit for all languages.'),
   page: z.number().int().min(1).max(200).default(1),
-  limit: z.number().int().min(1).max(50).default(12),
+  limit: z.number().int().min(1).max(50).default(5),
+  detailed: z.boolean().default(false).describe('Include volume, release/update timestamps and groups for each chapter.'),
 }).strict();
 const chapter = z.object({
   hid, number: z.string().nullable(), volume: z.string().nullable(), title: z.string().nullable(),
@@ -289,13 +355,14 @@ const chapter = z.object({
   created_at: z.string().datetime({ offset: true }).nullable(), updated_at: z.string().datetime({ offset: true }).nullable(),
   groups: z.array(z.string()), url: z.string().url().nullable(),
 });
+const compactChapter = chapter.pick({ hid: true, number: true, title: true, lang: true, url: true });
 export const chaptersOutput = z.object({
-  title_hid: hid, items: z.array(chapter).max(50), total: z.number().int().nonnegative(),
+  title_hid: hid, items: z.array(z.union([chapter, compactChapter])).max(50), total: z.number().int().nonnegative(),
   page: z.number().int().positive(), limit: z.number().int().positive(), order: z.literal('newest_created_first'), warnings: z.array(z.string()),
 });
 
 export async function chapters(input: z.input<typeof chaptersSchema>) {
-  const { hid: titleHid, slug, lang, page, limit } = chaptersSchema.parse(input);
+  const { hid: titleHid, slug, lang, page, limit, detailed } = chaptersSchema.parse(input);
   const timestamp = z.string().datetime({ offset: true }).nullish().transform(value => value ?? null);
   const response = parse(z.object({
     chapters: z.array(z.object({
@@ -304,7 +371,7 @@ export async function chapters(input: z.input<typeof chaptersSchema>) {
     })).max(limit),
     total: z.number().int().nonnegative(), limit: z.number().int().positive(),
   }), await catalogGet(`/v1.0/comic/${encodeURIComponent(titleHid)}/chapters`, { entry_type: 'chapter', lang, page, limit, 'date-order': 0 }));
-  return parse(chaptersOutput, {
+  const full = parse(chaptersOutput, {
     title_hid: titleHid, page, limit: response.limit, total: response.total, order: 'newest_created_first',
     items: response.chapters.map(item => ({
       hid: item.hid, number: item.chap, volume: item.vol ?? null, title: item.title, lang: item.lang,
@@ -313,4 +380,5 @@ export async function chapters(input: z.input<typeof chaptersSchema>) {
     })),
     warnings: slug ? [] : ['Supply the exact title slug from comick_search to include reader links.'],
   });
+  return detailed ? full : { ...full, items: full.items.map(item => compactChapter.parse(item)) };
 }
