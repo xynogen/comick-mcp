@@ -3,7 +3,7 @@ import { test, mock } from 'node:test';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -123,7 +123,10 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     assert.equal((await originalFetch(callback)).status, 400);
     assert.equal(exchanges, 0);
     callback.search = new URLSearchParams({ state: authorize.searchParams.get('state'), code: 'test-code' });
-    assert.equal((await originalFetch(callback)).status, 200);
+    const firstCallback = await originalFetch(callback);
+    assert.equal(firstCallback.status, 200);
+    assert.match(firstCallback.headers.get('content-type'), /text\/html/);
+    assert.match(await firstCallback.text(), /Kembali ke halaman connect/);
     await login;
     assert.equal(exchanges, 1);
     await assert.rejects(stat(`${directory}/.comick/tokens.json`), { code: 'ENOENT' });
@@ -160,7 +163,13 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       const callbackResponse = await originalFetch(callback);
       assert.equal(callbackResponse.status, 200);
       assert.equal(callbackResponse.headers.get('cache-control'), 'no-store');
-      assert.doesNotMatch(await callbackResponse.text(), /access-new|refresh-new/);
+      assert.match(callbackResponse.headers.get('content-type'), /text\/html/);
+      assert.match(callbackResponse.headers.get('content-security-policy'), /default-src 'none'/);
+      const callbackHtml = await callbackResponse.text();
+      assert.match(callbackHtml, /color-scheme: dark/);
+      assert.match(callbackHtml, /Login masih diproses/);
+      assert.match(callbackHtml, /href="http:\/\/127\.0\.0\.1:8788\/"/);
+      assert.doesNotMatch(callbackHtml, /test-code|access-new|refresh-new|check the terminal/);
       const connected = await waitForLogin();
       assert.equal(connected.status, 'connected');
       assert.equal(connected.refresh_available, true);
@@ -263,6 +272,41 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     globalThis.fetch = async url => String(url).includes('/v1.0/comic/') ? new Response(null, { status: 403 })
       : Response.json({ data: { hid: 'WrongHid', slug: 'wrong-title', title: 'Wrong', media_type: 'manga' } });
     await assert.rejects(catalog.title({ slug: 'known-title', hid: 'KnownHid' }), error => error.code === 'invalid_response');
+
+    const entry = { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', status: 1, status_name: 'reading',
+      progress: { unit: 'chapter', hid: null, number: '12.5', volume: '0' },
+      continue_entry: { unit: 'chapter', hid: 'ChapterHid', number: 'Special', volume: null },
+      rating: 8.5, bayesian_rating: 9.1, publication_status: 2, translation_completed: true, last_released_number: '20.5', total_units: null,
+      followed_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', progressed_at: null, last_released_at: null,
+      url: 'https://comick.dev/comic/known-title', notes: 'DO_NOT_FORWARD', access_token: 'DO_NOT_FORWARD' };
+    let entryCalls = 0;
+    globalThis.fetch = async (url, options) => {
+      entryCalls++;
+      assert.equal(String(url), `${oauth.resource}/me/library/KnownHid`);
+      assert.equal(options.headers.Authorization, 'Bearer access-old');
+      assert.equal(options.cache, 'no-store');
+      assert.equal(options.credentials, 'omit');
+      return Response.json({ data: entry });
+    };
+    const saved = await catalog.libraryEntry({ hid: 'KnownHid' });
+    assert.equal(entryCalls, 1);
+    assert.equal(saved.data.progress.number, '12.5');
+    assert.equal(saved.data.progress.volume, '0');
+    assert.equal(saved.data.progress.hid, null);
+    assert.equal(saved.data.continue_entry.number, 'Special');
+    assert.equal(saved.data.rating, 8.5);
+    assert.doesNotMatch(JSON.stringify(saved), /DO_NOT_FORWARD/);
+    for (const invalid of [{ ...entry, hid: 'Wrong' }, { ...entry, progress: { ...entry.progress, number: 12 } },
+      { ...entry, progress: { ...entry.progress, unit: 'episode' } }]) {
+      globalThis.fetch = async () => Response.json({ data: invalid });
+      await assert.rejects(catalog.libraryEntry({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
+    }
+    globalThis.fetch = async () => Response.json({ data: { ...entry, media_type: 'anime', status_name: 'watching', progress: null, continue_entry: null } });
+    assert.equal((await catalog.libraryEntry({ hid: 'KnownHid' })).data.progress, null);
+    for (const status of [403, 404, 429]) {
+      globalThis.fetch = async () => new Response(null, { status });
+      await assert.rejects(catalog.libraryEntry({ hid: 'KnownHid' }), error => error.status === status && (status !== 404 || error.code === 'library_entry_not_found'));
+    }
 
     const revoked = [];
     globalThis.fetch = async (url, options) => {
@@ -445,9 +489,10 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
       assert.equal(options.headers, undefined);
       assert.equal(options.credentials, 'omit');
       assert.equal(url.searchParams.has('synopsis_limit'), false);
+      assert.equal(url.searchParams.has('detailed'), false);
       return Response.json(url.pathname === '/genre/' ? genres : [item]);
     };
-    const page = await search({ q: 'known', synopsis_limit: 100 });
+    const page = await search({ q: 'known', synopsis_limit: 100, detailed: true });
     assert.ok(searchOutput.safeParse(page).success);
     assert.equal(page.items[0].title, 'Display Title');
     assert.equal(page.items[0].rating.site_score, 9.19);
@@ -462,18 +507,36 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
     assert.equal(calls.length, 2);
     assert.doesNotMatch(JSON.stringify(page), /private-contributor|script|reviews|comic_count/);
     assert.equal('total' in page, false);
+    calls = [];
+    const compact = await search({ q: 'known' });
+    assert.ok(searchOutput.safeParse(compact).success);
+    assert.equal(compact.limit, 5);
+    assert.equal(compact.items[0].rating, 9.19);
+    assert.equal(compact.items[0].status, 'completed');
+    assert.deepEqual(Object.keys(compact.items[0]).sort(), ['hid', 'rating', 'slug', 'status', 'title']);
+    assert.equal(calls.length, 1);
+    assert.equal('unresolved_genre_ids' in compact.items[0], false);
+    assert.ok(JSON.stringify(compact).length < JSON.stringify(page).length);
+    assert.equal('synopsis' in (await search({ synopsis_limit: 0 })).items[0], false);
+    assert.ok(calls.some(url => new URL(url).searchParams.get('limit') === '5'));
+    const manyGenres = Array.from({ length: 12 }, (_, id) => ({ id, name: `Theme ${id}`, slug: `theme-${id}`, group: 'Theme' }));
+    globalThis.fetch = async url => Response.json(url.pathname === '/genre/' ? manyGenres : [{ ...item, genres: manyGenres.map(value => value.id), desc: 'x'.repeat(500) }]);
+    const bounded = await search({ detailed: true });
+    assert.equal(bounded.items[0].genres.length, 12);
+    assert.equal(bounded.items[0].synopsis_truncated, true);
+    globalThis.fetch = async url => Response.json(url.pathname === '/genre/' ? genres : [item]);
     assert.equal((await filters('genres')).items[0].name, 'Action');
     globalThis.fetch = async () => Response.json([{ title: 'Level System', slug: 'level-system', id: 1, comic_count: 300 }]);
     assert.deepEqual((await filters('tags')).items, [{ name: 'Level System', slug: 'level-system', group: null }]);
 
     globalThis.fetch = async url => url.pathname === '/genre/' ? new Response(null, { status: 503 }) : Response.json([item]);
-    const unresolved = await search({});
+    const unresolved = await search({ detailed: true });
     assert.equal(unresolved.items.length, 1);
     assert.equal(unresolved.warnings.length, 1);
     assert.deepEqual(unresolved.items[0].unresolved_genre_ids, [5, 999]);
     for (const value of ['', '  ', 'not-a-number', null]) {
       globalThis.fetch = async () => Response.json([{ ...item, genres: [], bayesian_rating: value }]);
-      assert.equal((await search({})).items[0].rating.site_score, null);
+      assert.equal((await search({})).items[0].rating, null);
     }
     for (const invalid of [{ ...item, hid: '../bad' }, { ...item, media_type: 'anime' }, { ...item, title: '' }]) {
       globalThis.fetch = async () => Response.json([invalid]);
@@ -535,6 +598,62 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
   }
 });
 
+test('chapter paging, date order, language filters, reader links and safe failures', async () => {
+  const { chapters, chaptersSchema, libraryEntrySchema } = await import('./dist/catalog.js');
+  const originalFetch = globalThis.fetch;
+  const row = { hid: 'ChapterHid', chap: '12.5', vol: '0', title: 'Special', lang: 'pt-br',
+    publish_at: '2026-01-01T02:00:00+02:00', created_at: '2026-01-01T01:00:00+02:00', updated_at: null,
+    group_name: ['Example'], identities: { private: 'DO_NOT_FORWARD' }, id: 10 };
+  try {
+    let count = 0;
+    globalThis.fetch = async (url, options) => {
+      count++;
+      assert.equal(url.pathname, '/v1.0/comic/TitleHid/chapters');
+      assert.equal(url.searchParams.get('date-order'), '0');
+      assert.equal(url.searchParams.get('entry_type'), 'chapter');
+      assert.equal(url.searchParams.get('page'), '2');
+      assert.equal(url.searchParams.get('limit'), '2');
+      assert.equal(url.searchParams.get('lang'), 'en,pt-br,es-419');
+      assert.equal(url.searchParams.has('slug'), false);
+      assert.equal(options.headers, undefined);
+      assert.equal(options.credentials, 'omit');
+      return Response.json({ chapters: [row, { ...row, hid: 'ZeroHid', chap: '0' }], total: 20, limit: 2 });
+    };
+    const page = await chapters({ hid: 'TitleHid', slug: 'known-title', lang: 'en,pt-br,es-419', page: 2, limit: 2 });
+    assert.equal(count, 1);
+    assert.equal(page.total, 20);
+    assert.equal(page.order, 'newest_created_first');
+    assert.equal(page.items[0].number, '12.5');
+    assert.equal(page.items[0].volume, '0');
+    assert.equal(page.items[1].number, '0');
+    assert.equal(page.items[0].url, 'https://comick.dev/comic/known-title/ChapterHid');
+    assert.equal(page.items[0].released_at, row.publish_at);
+    assert.doesNotMatch(JSON.stringify(page), /DO_NOT_FORWARD|identities/);
+    globalThis.fetch = async () => Response.json({ chapters: [{ ...row, chap: 'Extra' }], total: 1, limit: 12 });
+    const withoutSlug = await chapters({ hid: 'TitleHid' });
+    assert.equal(withoutSlug.items[0].url, null);
+    assert.equal(withoutSlug.items[0].number, 'Extra');
+    assert.equal(withoutSlug.warnings.length, 1);
+    globalThis.fetch = async () => Response.json({ chapters: [], total: 0, limit: 12 });
+    assert.equal((await chapters({ hid: 'TitleHid' })).items.length, 0);
+    for (const invalid of [{ hid: '../bad' }, { hid: 'Hid', lang: '' }, { hid: 'Hid', lang: 'en,' },
+      { hid: 'Hid', page: 0 }, { hid: 'Hid', limit: 51 }, { hid: 'Hid', slug: '../bad' }, { hid: 'Hid', token: 'secret' }]) {
+      assert.equal(chaptersSchema.safeParse(invalid).success, false);
+    }
+    assert.equal(libraryEntrySchema.safeParse({ hid: 'Hid', user_id: 'other' }).success, false);
+    for (const malformed of [{ ...row, hid: '../bad' }, { ...row, chap: 12.5 }, { ...row, publish_at: 'not-a-date' }]) {
+      globalThis.fetch = async () => Response.json({ chapters: [malformed], total: 1, limit: 12 });
+      await assert.rejects(chapters({ hid: 'TitleHid' }), error => error.code === 'invalid_response');
+    }
+    for (const status of [403, 404, 429, 503]) {
+      globalThis.fetch = async () => new Response(null, { status, headers: { 'retry-after': '60' } });
+      await assert.rejects(chapters({ hid: 'TitleHid' }), error => error.status === status && error.retryAfter === '60');
+    }
+    globalThis.fetch = async () => new Response('<html>Challenge</html>');
+    await assert.rejects(chapters({ hid: 'TitleHid' }), error => error.code === 'non_json_response');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('real MCP stdio handshake, tool listing, validation and missing login', async () => {
   const transport = new StdioClientTransport({
     command: process.execPath, args: [`${root}dist/index.js`],
@@ -544,12 +663,12 @@ test('real MCP stdio handshake, tool listing, validation and missing login', asy
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['comick_connect', 'comick_disconnect', 'comick_filters', 'comick_library', 'comick_me', 'comick_search', 'comick_title']);
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['comick_chapters', 'comick_connect', 'comick_disconnect', 'comick_filters', 'comick_library', 'comick_library_entry', 'comick_me', 'comick_search', 'comick_title']);
     assert.ok(tools.filter(tool => !['comick_connect', 'comick_disconnect'].includes(tool.name)).every(tool => tool.annotations.readOnlyHint));
     const disconnect = tools.find(tool => tool.name === 'comick_disconnect');
     assert.equal(disconnect.annotations.destructiveHint, true);
     assert.equal(disconnect.annotations.idempotentHint, true);
-    for (const name of ['comick_search', 'comick_title', 'comick_filters', 'comick_disconnect']) assert.ok(tools.find(tool => tool.name === name).outputSchema);
+    for (const name of ['comick_search', 'comick_title', 'comick_filters', 'comick_disconnect', 'comick_library_entry', 'comick_chapters']) assert.ok(tools.find(tool => tool.name === name).outputSchema);
     assert.equal(tools.find(tool => tool.name === 'comick_connect').annotations.readOnlyHint, false);
     const connection = await client.callTool({ name: 'comick_connect', arguments: { action: 'start' } });
     assert.equal(connection.isError, true);
@@ -560,6 +679,8 @@ test('real MCP stdio handshake, tool listing, validation and missing login', asy
     assert.doesNotMatch(invalid.content[0].text, /COMICK_CLIENT_ID/);
     for (const [name, args] of [['comick_search', { minimum: 20, maximum: 10 }],
       ['comick_search', { genres: Array(11).fill('action') }], ['comick_title', { slug: '../me' }],
+      ['comick_library_entry', { hid: '../me' }], ['comick_chapters', { hid: 'Hid', lang: 'en/../../' }],
+      ['comick_chapters', { hid: 'Hid', page: 0 }], ['comick_chapters', { hid: 'Hid', limit: 51 }],
       ['comick_filters', { kind: 'unknown' }], ['comick_disconnect', { token: 'secret' }], ['comick_connect', { action: 'start', token: 'secret' }]]) {
       const rejected = await client.callTool({ name, arguments: args });
       assert.equal(rejected.isError, true);
@@ -567,6 +688,9 @@ test('real MCP stdio handshake, tool listing, validation and missing login', asy
     const result = await client.callTool({ name: 'comick_me', arguments: {} });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /COMICK_CLIENT_ID/);
+    const entry = await client.callTool({ name: 'comick_library_entry', arguments: { hid: 'KnownHid' } });
+    assert.equal(entry.isError, true);
+    assert.equal(JSON.parse(entry.content[0].text).error.code, 'configuration_required');
   } finally {
     await client.close();
     await transport.close();
@@ -582,6 +706,7 @@ globalThis.fetch = async (url) => {
   if (url.pathname === '/genre/') return Response.json([{id:5,name:'Action',slug:'action',group:'Genre'}]);
   if (url.pathname === '/v1.0/search/') return Response.json([{hid:'Hid',slug:'sample',title:'Sample',genres:[5],bayesian_rating:'8.5'}]);
   if (url.pathname === '/v1.0/comic/sample/') return Response.json({comic:{hid:'Hid',slug:'sample',title:'Sample'}});
+  if (url.pathname === '/v1.0/comic/Hid/chapters') return Response.json({chapters:[{hid:'ChapterHid',chap:'0',vol:null,title:null,lang:'en'}],total:1,limit:12});
   throw new Error('Unexpected upstream request');
 };
 `);
@@ -594,11 +719,14 @@ globalThis.fetch = async (url) => {
   transport.stderr?.on('data', chunk => { stderr += chunk; });
   try {
     await client.connect(transport);
-    for (const [name, args] of [['comick_search', {}], ['comick_title', { slug: 'sample' }], ['comick_filters', { kind: 'genres' }]]) {
+    for (const [name, args] of [['comick_search', {}], ['comick_title', { slug: 'sample' }], ['comick_filters', { kind: 'genres' }], ['comick_chapters', { hid: 'Hid', slug: 'sample' }]]) {
       const response = await client.callTool({ name, arguments: args });
       assert.notEqual(response.isError, true);
       assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent);
-      if (name === 'comick_search') assert.equal(response.structuredContent.items[0].genres[0].name, 'Action');
+      if (name === 'comick_search') {
+        assert.deepEqual(Object.keys(response.structuredContent.items[0]).sort(), ['hid', 'rating', 'slug', 'status', 'title']);
+        assert.equal(response.structuredContent.limit, 5);
+      }
     }
     const failure = await client.callTool({ name: 'comick_search', arguments: { q: 'fail' } });
     assert.equal(failure.isError, true);
@@ -608,6 +736,41 @@ globalThis.fetch = async (url) => {
     await client.close();
     await transport.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('local connect UI only serves loopback status and same-origin connect', async () => {
+  const { createUiServer } = await import('./dist/ui.js');
+  const server = createUiServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const previousId = process.env.COMICK_CLIENT_ID;
+  delete process.env.COMICK_CLIENT_ID;
+  try {
+    const page = await fetch(origin);
+    const html = await page.text();
+    assert.equal(page.status, 200);
+    assert.match(html, /Connect Comick|Reload status/);
+    assert.match(html, /color-scheme:\s*dark/);
+    assert.match(html, /focus-visible/);
+    assert.match(page.headers.get('content-security-policy'), /script-src 'nonce-/);
+    assert.equal(page.headers.get('cache-control'), 'no-store');
+    assert.equal((await fetch(`${origin}/status`)).status, 503);
+    assert.equal((await fetch(`${origin}/connect`, { method: 'POST', headers: { Origin: 'https://other.example', 'Content-Type': 'application/json' } })).status, 403);
+    const connect = await fetch(`${origin}/connect`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' } });
+    assert.equal(connect.status, 503);
+    assert.match((await connect.json()).error, /COMICK_CLIENT_ID/);
+    const hostileStatus = await new Promise((resolve, reject) => {
+      const request = httpRequest(origin, { headers: { Host: 'attacker.example' } }, response => { response.resume(); resolve(response.statusCode); });
+      request.on('error', reject).end();
+    });
+    assert.equal(hostileStatus, 404);
+    assert.equal((await fetch(`${origin}/callback?code=secret`)).status, 404);
+  } finally {
+    if (previousId === undefined) delete process.env.COMICK_CLIENT_ID;
+    else process.env.COMICK_CLIENT_ID = previousId;
+    await new Promise(resolve => server.close(resolve));
   }
 });
 

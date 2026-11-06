@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { apiGet, ComickError, connect, disconnect, disconnectOutput } from './oauth.js';
-import { filters, filtersOutput, search, searchOutput, searchSchema, title, titleOutput, titleSchema } from './catalog.js';
+import { chapters, chaptersOutput, chaptersSchema, filters, filtersOutput, libraryEntry, libraryEntryOutput, libraryEntrySchema, search, searchOutput, searchSchema, title, titleOutput, titleSchema } from './catalog.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 
@@ -53,8 +53,18 @@ serveStdio(() => {
     annotations: readOnly,
   }, query => result(() => apiGet('/me/library', query)));
 
+  server.registerTool('comick_library_entry', {
+    description: 'Read saved progress, Continue entry, reading/watching status and personal rating for one title HID in the connected library. Requires library:read. Progress numbers are strings and describe saved progress, not the next unread chapter. A 404 does not prove that a title exists or is unfollowed. No library-wide scan or write is performed.',
+    inputSchema: libraryEntrySchema, outputSchema: libraryEntryOutput, annotations: readOnly,
+  }, query => result(() => libraryEntry(query)));
+
+  server.registerTool('comick_chapters', {
+    description: 'List one page of manga chapters for a title HID without login, newest creation first (not highest chapter number). Returns release/update dates, language, groups and chapter numbers as strings. Supply the exact title slug from search for reader links. lang accepts comma-separated codes such as en,id or pt-br. Multiple releases of the same number are distinct; this is not an unread list, final chapter count, image downloader or anime episode tool.',
+    inputSchema: chaptersSchema, outputSchema: chaptersOutput, annotations: readOnly,
+  }, query => result(() => chapters(query)));
+
   server.registerTool('comick_search', {
-    description: 'Search or browse public manga/manhwa/manhua (anime optional), without login. For similar manga: find the source by q, inspect comick_title, then search using a few relevant genre/theme/tag slugs WITHOUT q. Results are filter matches ordered by sort, not similarity scores; explain the shared themes and omit the source itself. Returns one page, with no total count. Keyword ranking can override sorting; an empty page is not an error.',
+    description: 'Search public manga/manhwa/manhua (anime optional) without login. Default: an index of 5 matches with only HID, slug, title, rating and status; no synopsis or genre lookup. Use filters to narrow candidates, then call comick_title for only 1–2 selected matches. Keep detailed=false unless full metadata for every match is explicitly needed. Do not increase limit or fetch every title by default. For similar manga, search genre/theme slugs WITHOUT q. Filter matches, not similarity scores; one page, no total.',
     inputSchema: searchSchema,
     outputSchema: searchOutput,
     annotations: readOnly,

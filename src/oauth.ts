@@ -311,7 +311,27 @@ export async function login(onAuthorize?: (url: string) => void) {
             reject(new Error('Comick authorization denied.'));
             return;
           }
-          response.end('Callback received. You can close this tab; check the terminal for the login result.');
+          const uiPort = Number(process.env.COMICK_UI_PORT ?? 8788);
+          const returnUrl = Number.isInteger(uiPort) && uiPort >= 1 && uiPort <= 65535
+            ? `http://127.0.0.1:${uiPort}/` : 'http://127.0.0.1:8788/';
+          response.setHeader('Content-Type', 'text/html; charset=utf-8');
+          response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+          response.end(`<!doctype html>
+<html lang="id"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#151821"><title>Comick MCP — Izin diterima</title>
+<style>
+  :root { color-scheme: dark; font: 16px/1.55 system-ui, sans-serif; background: #151821; color: #e6e9f0; }
+  body { box-sizing: border-box; min-height: 100vh; min-height: 100svh; max-width: 36rem; margin: 0 auto; padding: 1rem; display: flex; flex-direction: column; justify-content: center; text-align: center; }
+  h1 { font-size: 1.5rem; margin: 0 0 1.25rem; }
+  p { margin: 0; padding: 1rem; background: #202531; border: 1px solid #394151; border-radius: .75rem; }
+  a { display: inline-block; margin-top: 1rem; padding: .55rem .9rem; border: 1px solid #50596d; border-radius: .5rem; color: #e6e9f0; background: #292f3d; text-decoration: none; }
+  a:hover { background: #394151; }
+  a:focus-visible { outline: 2px solid #a0baff; outline-offset: 3px; }
+</style>
+<h1>Comick MCP</h1>
+<p>Izin diterima. Login masih diproses; kembali ke halaman connect dan klik Reload status untuk memastikan tersambung.</p>
+<a href="${returnUrl}">Kembali ke halaman connect</a>
+</html>`);
           accept(codes[0]);
         });
         console.error(`Open this URL in your browser to connect Comick:\n${authorize.href}`);

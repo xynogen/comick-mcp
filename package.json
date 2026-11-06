@@ -10,6 +10,7 @@
     "build": "tsc",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "login": "node --env-file-if-exists=.env dist/oauth.js",
+    "ui": "node --env-file-if-exists=.env dist/ui.js",
     "test": "npm run build && node --test test.mjs"
   },
   "dependencies": {

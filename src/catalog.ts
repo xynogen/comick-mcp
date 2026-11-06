@@ -24,8 +24,9 @@ export const searchSchema = z.object({
   sort: z.enum(['view', 'created_at', 'uploaded', 'rating', 'average_rating', 'follow', 'user_follow_count']).default('rating'),
   media_type: z.enum(['manga', 'anime']).default('manga'),
   page: z.number().int().min(1).max(50).default(1),
-  limit: z.number().int().min(1).max(50).default(15),
-  synopsis_limit: z.number().int().min(100).max(2000).default(600).describe('Maximum synopsis characters per result; an excerpt, not an AI summary.'),
+  limit: z.number().int().min(1).max(50).default(5),
+  detailed: z.boolean().default(false).describe('Default is an index only: HID, slug, title, rating and status. Fetch comick_title for selected matches; true includes metadata for every match.'),
+  synopsis_limit: z.number().int().min(0).max(2000).default(180).describe('Synopsis excerpt length in detailed mode only; 0 omits synopsis text.'),
 }).strict().superRefine((query, context) => {
   for (const [lower, upper] of [['minimum', 'maximum'], ['from', 'to']] as const) {
     if (query[lower] !== undefined && query[upper] !== undefined && query[lower] > query[upper]) {
@@ -94,8 +95,13 @@ const summary = z.object({
   translation_completed: z.boolean().nullable(), country: z.string().nullable(), year: z.number().int().nullable(),
   last_released_number: z.string().nullable(), content_rating: contentRating.nullable(), violence_rating: z.enum(['none', 'graphic']).nullable(),
 });
+const compactSummary = z.object({
+  hid, slug: identifier, title: label,
+  rating: z.number().min(0).max(10).nullable(),
+  status: z.enum(['ongoing', 'completed', 'cancelled', 'hiatus']).nullable(),
+});
 export const searchOutput = z.object({
-  items: z.array(summary).max(50), page: z.number().int(), limit: z.number().int(), returned_count: z.number().int(), warnings: z.array(z.string()),
+  items: z.array(z.union([compactSummary, summary])).max(50), page: z.number().int(), limit: z.number().int(), returned_count: z.number().int(), warnings: z.array(z.string()),
 });
 export const filtersOutput = z.object({ items: z.array(genre), warnings: z.array(z.string()) });
 export const titleSchema = z.object({
@@ -158,13 +164,17 @@ async function resolveGenres(items: RawTitle[], warnings: string[]) {
 }
 
 export async function search(input: z.input<typeof searchSchema>) {
-  const { synopsis_limit, ...query } = searchSchema.parse(input);
+  const { synopsis_limit, detailed, ...query } = searchSchema.parse(input);
   const items = parse(z.array(rawTitle).max(query.limit), await catalogGet('/v1.0/search/', query));
   if (items.some(item => item.media_type && item.media_type !== query.media_type)) throw new ComickError('invalid_response', 'Comick returned a different media type.');
   const warnings: string[] = [];
-  const genres = await resolveGenres(items, warnings);
+  const genres = detailed ? await resolveGenres(items, warnings) : [];
   return parse(searchOutput, {
-    items: items.map(item => summarize(item, query.media_type, synopsis_limit, genres)),
+    items: items.map(item => {
+      const data = summarize(item, query.media_type, detailed ? synopsis_limit : 0, genres);
+      if (detailed) return data;
+      return { hid: data.hid, slug: data.slug, title: data.title, rating: data.rating.site_score, status: data.publication_status?.name ?? null };
+    }),
     page: query.page, limit: query.limit, returned_count: items.length, warnings,
   });
 }
@@ -225,5 +235,82 @@ export async function title(input: z.input<typeof titleSchema>) {
         url: `https://comick.dev/${type === 'anime' ? 'anime' : 'comic'}/${related.slug}`, votes: value.total };
     }),
     partial: source !== 'catalog_detail', source, missing_fields: missing, warnings,
+  });
+}
+
+export const libraryEntrySchema = z.object({ hid }).strict();
+const progress = z.object({
+  unit: z.enum(['chapter', 'episode']), hid: hid.nullable(), number: z.string().nullable(), volume: z.string().nullable(),
+});
+export const libraryEntryOutput = z.object({ data: z.object({
+  hid, slug: identifier, title: label, media_type: mediaType,
+  status: z.number().int().min(1).max(5),
+  status_name: z.enum(['reading', 'watching', 'completed', 'on_hold', 'dropped', 'plan_to_read', 'plan_to_watch', 'unknown']),
+  progress: progress.nullable(), continue_entry: progress.nullable(),
+  rating: z.number().min(1).max(10).nullable(), bayesian_rating: z.number().min(0).max(10).nullable(),
+  publication_status: z.number().int().min(1).max(4).nullable(),
+  translation_completed: z.boolean().nullable(), last_released_number: z.string().nullable(),
+  total_units: z.number().int().nonnegative().nullable(),
+  followed_at: z.string().datetime({ offset: true }), updated_at: z.string().datetime({ offset: true }),
+  progressed_at: z.string().datetime({ offset: true }).nullable(), last_released_at: z.string().datetime({ offset: true }).nullable(),
+  url: z.string().url(),
+}) });
+
+export async function libraryEntry(input: z.input<typeof libraryEntrySchema>) {
+  const { hid } = libraryEntrySchema.parse(input);
+  let response: unknown;
+  try { response = await apiGet(`/me/library/${encodeURIComponent(hid)}`); }
+  catch (error) {
+    if (error instanceof ComickError && error.status === 404) {
+      throw new ComickError('library_entry_not_found', 'No library entry was found for this HID, or the integration route is unavailable. This does not prove the title exists or is unfollowed.', 404);
+    }
+    throw error;
+  }
+  const result = parse(libraryEntryOutput, response);
+  if (result.data.hid !== hid) throw new ComickError('invalid_response', 'Comick returned a different library title identity.');
+  const unit = result.data.media_type === 'manga' ? 'chapter' : 'episode';
+  if ([result.data.progress, result.data.continue_entry].some(value => value && value.unit !== unit)) {
+    throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
+  }
+  return result;
+}
+
+export const chaptersSchema = z.object({
+  hid: hid.describe('Title HID from search or title details, not a chapter HID.'),
+  slug: identifier.optional().describe('Exact title slug from search; supply it to include chapter reader links.'),
+  lang: z.string().min(2).max(100).regex(/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*(?:,[a-z]{2,3}(?:-[a-z0-9]{2,8})*)*$/).optional()
+    .describe('Language codes, comma-separated, for example en,id or pt-br. Omit for all languages.'),
+  page: z.number().int().min(1).max(200).default(1),
+  limit: z.number().int().min(1).max(50).default(12),
+}).strict();
+const chapter = z.object({
+  hid, number: z.string().nullable(), volume: z.string().nullable(), title: z.string().nullable(),
+  lang: z.string().nullable(), released_at: z.string().datetime({ offset: true }).nullable(),
+  created_at: z.string().datetime({ offset: true }).nullable(), updated_at: z.string().datetime({ offset: true }).nullable(),
+  groups: z.array(z.string()), url: z.string().url().nullable(),
+});
+export const chaptersOutput = z.object({
+  title_hid: hid, items: z.array(chapter).max(50), total: z.number().int().nonnegative(),
+  page: z.number().int().positive(), limit: z.number().int().positive(), order: z.literal('newest_created_first'), warnings: z.array(z.string()),
+});
+
+export async function chapters(input: z.input<typeof chaptersSchema>) {
+  const { hid: titleHid, slug, lang, page, limit } = chaptersSchema.parse(input);
+  const timestamp = z.string().datetime({ offset: true }).nullish().transform(value => value ?? null);
+  const response = parse(z.object({
+    chapters: z.array(z.object({
+      hid, chap: z.string().nullable(), vol: z.string().nullish(), title: nullableText, lang: nullableText,
+      publish_at: timestamp, created_at: timestamp, updated_at: timestamp, group_name: z.array(label).nullish(),
+    })).max(limit),
+    total: z.number().int().nonnegative(), limit: z.number().int().positive(),
+  }), await catalogGet(`/v1.0/comic/${encodeURIComponent(titleHid)}/chapters`, { entry_type: 'chapter', lang, page, limit, 'date-order': 0 }));
+  return parse(chaptersOutput, {
+    title_hid: titleHid, page, limit: response.limit, total: response.total, order: 'newest_created_first',
+    items: response.chapters.map(item => ({
+      hid: item.hid, number: item.chap, volume: item.vol ?? null, title: item.title, lang: item.lang,
+      released_at: item.publish_at, created_at: item.created_at, updated_at: item.updated_at, groups: item.group_name ?? [],
+      url: slug ? `https://comick.dev/comic/${slug}/${item.hid}` : null,
+    })),
+    warnings: slug ? [] : ['Supply the exact title slug from comick_search to include reader links.'],
   });
 }
