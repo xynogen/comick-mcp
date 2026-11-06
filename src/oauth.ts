@@ -25,9 +25,15 @@ const storedSchema = tokenSchema.omit({ expires_in: true }).extend({
 });
 type StoredToken = z.infer<typeof storedSchema>;
 
+export class ComickError extends Error {
+  constructor(public code: string, message: string, public status?: number, public retryAfter?: string) {
+    super(message);
+  }
+}
+
 function clientId() {
   const id = process.env.COMICK_CLIENT_ID?.trim();
-  if (!id) throw new Error('Set COMICK_CLIENT_ID for a registered public Comick app.');
+  if (!id) throw new ComickError('configuration_required', 'Set COMICK_CLIENT_ID for a registered public Comick app.');
   return id;
 }
 
@@ -39,7 +45,7 @@ async function locked<T>(action: () => Promise<T>): Promise<T> {
     lock = await open(lockFile, 'wx', 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error(`Comick credentials are busy. Retry after login/refresh finishes. If a process crashed, remove ${lockFile} only after stopping all runners.`);
+      throw new ComickError('credentials_busy', `Comick credentials are busy. Retry after login/refresh finishes. If a process crashed, remove ${lockFile} only after stopping all runners.`);
     }
     throw error;
   }
@@ -51,23 +57,111 @@ async function locked<T>(action: () => Promise<T>): Promise<T> {
   }
 }
 
-// ponytail: Linux Secret Service via installed secret-tool; use a native keyring binding for other OSes.
-function keyring(operation: 'lookup' | 'store', id: string, secret?: string): Promise<string | null> {
-  if (process.platform !== 'linux') throw new Error('Comick keyring requires Linux Secret Service and secret-tool. No plaintext fallback is used.');
-  const args = operation === 'store' ? ['store', '--label=Comick MCP OAuth'] : ['lookup'];
+// ponytail: built-in PowerShell bridges WinCred; use a native binding if process startup becomes a bottleneck.
+const windowsKeyring = `
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class ComickCredentials {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct Credential {
+        public uint Flags, Type;
+        public string TargetName, Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public uint Persist, AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias, UserName;
+    }
+    [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool Read(string target, uint type, uint flags, out IntPtr credential);
+    [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool Write(ref Credential credential, uint flags);
+    [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool Remove(string target, uint type, uint flags);
+    public static void Delete(string target) {
+        if (!Remove(target, 1, 0)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error != 1168) throw new Win32Exception(error);
+        }
+    }
+    [DllImport("advapi32.dll")]
+    static extern void CredFree(IntPtr credential);
+    public static byte[] Lookup(string target) {
+        IntPtr pointer;
+        if (!Read(target, 1, 0, out pointer)) {
+            int error = Marshal.GetLastWin32Error();
+            if (error == 1168) return null;
+            throw new Win32Exception(error);
+        }
+        try {
+            var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
+            var bytes = new byte[credential.CredentialBlobSize];
+            Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
+            return bytes;
+        } finally { CredFree(pointer); }
+    }
+    public static void Store(string target, byte[] bytes) {
+        if (bytes.Length > 2560) throw new ArgumentException("Credential exceeds WinCred limit.");
+        IntPtr blob = Marshal.AllocHGlobal(bytes.Length);
+        try {
+            Marshal.Copy(bytes, 0, blob, bytes.Length);
+            var credential = new Credential { Type = 1, TargetName = target,
+                CredentialBlobSize = (uint)bytes.Length, CredentialBlob = blob,
+                Persist = 2, UserName = "Comick MCP" };
+            if (!Write(ref credential, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        } finally {
+            for (int i = 0; i < bytes.Length; i++) Marshal.WriteByte(blob, i, 0);
+            Marshal.FreeHGlobal(blob);
+            Array.Clear(bytes, 0, bytes.Length);
+        }
+    }
+}
+'@
+  $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  if ($request.operation -eq 'store') {
+    [ComickCredentials]::Store($request.target, [Convert]::FromBase64String($request.secret))
+  } elseif ($request.operation -eq 'lookup') {
+    $bytes = [ComickCredentials]::Lookup($request.target)
+    if ($null -ne $bytes) { [Console]::Out.Write([Convert]::ToBase64String($bytes)) }
+  } elseif ($request.operation -eq 'clear') {
+    [ComickCredentials]::Delete($request.target)
+  } else { exit 1 }
+} catch { exit 1 }
+`;
+function keyring(operation: 'lookup' | 'store' | 'clear', id: string, secret?: string): Promise<string | null> {
+  if (process.platform !== 'linux' && process.platform !== 'win32') throw new ComickError('unsupported_platform', 'Comick keyring requires Windows Credential Manager or Linux Secret Service. No plaintext fallback is used.');
+  const windows = process.platform === 'win32';
+  if (windows && secret !== undefined && Buffer.byteLength(secret, 'utf8') > 2560) {
+    throw new ComickError('credential_too_large', 'Comick credentials exceed the Windows Credential Manager limit of 2560 bytes. Existing credentials were not changed.');
+  }
+  const args = operation === 'store' ? ['store', '--label=Comick MCP OAuth'] : [operation];
   args.push('service', 'comick-mcp', 'issuer', issuer, 'client_id', id);
+  const command = windows ? 'powershell.exe' : 'secret-tool';
+  const input = windows ? JSON.stringify({
+    operation, target: `comick-mcp:${createHash('sha256').update(`${issuer}\0${id}`).digest('hex')}`,
+    secret: secret === undefined ? undefined : Buffer.from(secret, 'utf8').toString('base64'),
+  }) : secret;
+  const commandArgs = windows ? ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(windowsKeyring, 'utf16le').toString('base64')] : args;
   return new Promise((resolve, reject) => {
-    const child = execFile('secret-tool', args, { timeout: 30_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(command, commandArgs, { timeout: 30_000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       if (error) {
-        if (operation === 'lookup' && (error as { code?: string | number }).code === 1 && !stdout && !stderr) return resolve(null);
-        reject(new Error(`Comick OS keyring ${operation} failed. Ensure secret-tool is installed and the desktop Secret Service keyring is available and unlocked. No plaintext fallback is used.`));
+        if (!windows && operation !== 'store' && (error as { code?: string | number }).code === 1 && !stdout && !stderr) return resolve(null);
+        reject(new ComickError('credential_store_failed', `Comick OS keyring ${operation} failed. ${windows ? 'Ensure Windows Credential Manager is available for this Windows user.' : 'Ensure secret-tool is installed and the desktop Secret Service keyring is available and unlocked.'} No plaintext fallback is used.`));
         return;
       }
-      resolve(stdout.trim() || null);
+      resolve((windows ? Buffer.from(stdout.trim(), 'base64').toString('utf8') : stdout.trim()) || null);
     });
     // Never put credentials in command arguments or include subprocess errors in tool output.
-    child.stdin?.on('error', () => reject(new Error('Could not send credentials to the OS keyring. No plaintext fallback is used.')));
-    child.stdin?.end(secret);
+    child.stdin?.on('error', () => reject(new ComickError('credential_store_failed', 'Could not send credentials to the OS keyring. No plaintext fallback is used.')));
+    child.stdin?.end(input);
   });
 }
 
@@ -78,9 +172,9 @@ async function load(id: string): Promise<StoredToken | null> {
   try {
     parsed = storedSchema.safeParse(JSON.parse(secret));
   } catch {
-    throw new Error('Invalid Comick credentials in OS keyring. Reconnect with comick_connect.');
+    throw new ComickError('reconnect_required', 'Invalid Comick credentials in OS keyring. Reconnect with comick_connect.');
   }
-  if (!parsed.success || parsed.data.client_id !== id) throw new Error('Invalid Comick credentials in OS keyring. Reconnect with comick_connect.');
+  if (!parsed.success || parsed.data.client_id !== id) throw new ComickError('reconnect_required', 'Invalid Comick credentials in OS keyring. Reconnect with comick_connect.');
   return parsed.data;
 }
 
@@ -89,27 +183,39 @@ async function save(tokens: StoredToken) {
 }
 
 async function exchange(parameters: Record<string, string>, id: string): Promise<StoredToken> {
-  const response = await fetch(`${issuer}/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ ...parameters, client_id: id, resource }),
-    signal: AbortSignal.timeout(20_000),
-    redirect: 'error',
-  });
-  if (!response.ok) throw new Error(`Comick token exchange failed (HTTP ${response.status}). Reconnect with npm run login; do not retry an old code or refresh token.`);
-  const parsed = tokenSchema.safeParse(await response.json());
-  if (!parsed.success) throw new Error('Invalid Comick token response or library:read not granted. Reconnect with npm run login.');
+  let response: Response;
+  try {
+    response = await fetch(`${issuer}/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ ...parameters, client_id: id, resource }),
+      signal: AbortSignal.timeout(20_000),
+      redirect: 'error', credentials: 'omit',
+    });
+  } catch {
+    throw new ComickError('reconnect_required', 'Comick token exchange could not be confirmed. Reconnect with npm run login; do not retry an old code or refresh token.');
+  }
+  if (!response.ok) throw new ComickError('reconnect_required', `Comick token exchange failed (HTTP ${response.status}). Reconnect with npm run login; do not retry an old code or refresh token.`);
+  let body: unknown;
+  try { body = await response.json(); }
+  catch { throw new ComickError('reconnect_required', 'Invalid Comick token response. Reconnect with npm run login.'); }
+  const parsed = tokenSchema.safeParse(body);
+  if (!parsed.success) throw new ComickError('reconnect_required', 'Invalid Comick token response or library:read not granted. Reconnect with npm run login.');
   const { expires_in, ...tokens } = parsed.data;
   return { ...tokens, client_id: id, expires_at: Date.now() + expires_in * 1000 };
+}
+
+export async function hasCredentials() {
+  return Boolean(process.env.COMICK_CLIENT_ID?.trim() && await load(clientId()));
 }
 
 export async function accessToken(rejectedToken?: string) {
   return locked(async () => {
     const id = clientId();
     const tokens = await load(id);
-    if (!tokens) throw new Error('No Comick credentials in OS keyring. Use comick_connect or npm run login first.');
+    if (!tokens) throw new ComickError('reconnect_required', 'No Comick credentials in OS keyring. Use comick_connect or npm run login first.');
     if (tokens.expires_at > Date.now() + 30_000 && tokens.access_token !== rejectedToken) return tokens.access_token;
-    if (!tokens.refresh_token) throw new Error('Comick session expired or revoked. Reconnect with npm run login.');
+    if (!tokens.refresh_token) throw new ComickError('reconnect_required', 'Comick session expired or revoked. Reconnect with npm run login.');
     const { refresh_token, ...withoutRefresh } = tokens;
     // A refresh may consume the old token even if its response is lost; never reuse it.
     await save({ ...withoutRefresh, expires_at: 0 });
@@ -126,21 +232,25 @@ export async function apiGet(path: string, query: Record<string, string | number
   }
   let token = await accessToken();
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(20_000),
-      redirect: 'error',
-      cache: 'no-store',
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(20_000),
+        redirect: 'error', credentials: 'omit',
+        cache: 'no-store',
+      });
+    } catch { throw new ComickError('network_error', 'Comick API network unavailable or request timed out.'); }
     if (response.status === 401 && attempt === 0) {
       token = await accessToken(token);
       continue;
     }
     if (!response.ok) {
       const retryAfter = response.headers.get('retry-after');
-      throw new Error(`Comick API returned HTTP ${response.status}${retryAfter ? `; Retry-After: ${retryAfter}` : ''}.`);
+      throw new ComickError(response.status === 429 ? 'rate_limited' : response.status === 401 ? 'reconnect_required' : 'api_error', `Comick API returned HTTP ${response.status}${retryAfter ? `; Retry-After: ${retryAfter}` : ''}.`, response.status, retryAfter ?? undefined);
     }
-    return response.json();
+    try { return await response.json() as unknown; }
+    catch { throw new ComickError('invalid_response', 'Comick API returned invalid JSON.'); }
   }
   throw new Error('Comick authorization failed. Reconnect with npm run login.');
 }
@@ -264,6 +374,49 @@ export async function connect(action: 'start' | 'status', open_browser = true) {
     if (connection.status === 'pending') connection = { ...connection, ...browser };
   }
   return connection;
+}
+
+export const disconnectOutput = z.object({
+  status: z.literal('disconnected'),
+  local_deleted: z.literal(true),
+  revocation: z.enum(['complete', 'partial', 'failed', 'not_needed']),
+  warnings: z.array(z.string()),
+});
+
+export async function disconnect() {
+  if (pendingLogin) throw new ComickError('credentials_busy', 'Comick credentials are busy. Finish the pending login before disconnecting.');
+  return locked(async () => {
+    const id = clientId();
+    const tokens = await load(id);
+    const warnings: string[] = [];
+    const credentials = tokens ? [
+      { token: tokens.access_token, token_type_hint: 'access_token' },
+      ...(tokens.refresh_token ? [{ token: tokens.refresh_token, token_type_hint: 'refresh_token' }] : []),
+    ] : [];
+    let revoked = 0;
+    for (const credential of credentials) {
+      try {
+        const response = await fetch(`${issuer}/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ client_id: id, ...credential }),
+          signal: AbortSignal.timeout(20_000), redirect: 'error', credentials: 'omit',
+        });
+        if (response.ok) revoked++;
+        else warnings.push(`Could not revoke ${credential.token_type_hint} (HTTP ${response.status}).`);
+      } catch {
+        warnings.push(`Could not confirm revocation of ${credential.token_type_hint}; no automatic retry was made.`);
+      }
+    }
+    await keyring('clear', id);
+    connection = { status: 'disconnected' };
+    if (revoked < credentials.length) warnings.push('Local credentials were deleted, but server access may remain. Disconnect this app at https://comick.dev/user/connected-apps.');
+    return disconnectOutput.parse({
+      status: 'disconnected', local_deleted: true,
+      revocation: credentials.length === 0 ? 'not_needed' : revoked === credentials.length ? 'complete' : revoked ? 'partial' : 'failed',
+      warnings,
+    });
+  });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
