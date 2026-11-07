@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { ComickError, connect, disconnect, disconnectOutput } from './oauth.js';
-import { library, libraryOutput, librarySchema, libraryEntry, libraryEntryResult, libraryEntrySchema, me, meOutput, meSchema, search, searchOutput, searchSchema, title, titleResult, titleSchema, librarySave, librarySaveSchema, libraryRemove, libraryRemoveSchema, libraryRemoveOutput } from './catalog.js';
+import { library, libraryOutput, librarySchema, libraryEntry, libraryEntryResult, libraryEntrySchema, me, meOutput, meSchema, search, searchOutput, searchSchema, title, titleResult, titleSchema, librarySave, librarySaveSchema, libraryRemove, libraryRemoveSchema, libraryRemoveOutput } from './integration.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 
@@ -26,14 +26,9 @@ function invalidInput(error: z.ZodError, schema?: z.core.JSONSchema.JSONSchema) 
       return {
         path: issue.path, code: issue.code, expected,
         message: issue.code === 'unrecognized_keys' ? 'Unknown parameters are not allowed.' : issue.message,
-        recommendation: issue.code === 'unrecognized_keys' ? 'Remove parameters not listed in the tool input schema.'
-          : issue.code === 'custom' ? `Adjust this parameter to satisfy: ${issue.message}`
-          : field?.type === 'integer' || field?.type === 'number' ? `Set ${issue.path.join('.')} to a JSON ${field.type}${field.minimum !== undefined ? ` >= ${field.minimum}` : ''}${field.maximum !== undefined ? ` and <= ${field.maximum}` : ''}; use an unquoted number, not a string${nullable ? '; null clears this field' : ' or null'}.`
-          : issue.code === 'invalid_type' ? `Send a JSON ${issue.expected}; do not quote numbers or booleans, or send a scalar instead of an array.`
-          : issue.code === 'invalid_value' ? `Use one of these allowed values: ${issue.values.map(value => JSON.stringify(value)).join(', ')}.`
-          : issue.code === 'invalid_format' && ['hid', 'slug'].includes(String(issue.path.at(-1))) ? 'Use the exact HID or slug returned by comick_search, not a URL or path.'
-          : issue.code === 'invalid_format' && issue.path[0] === 'lang' ? 'Use language codes such as en, id, pt-br, or en,id; not language names.'
-          : `Adjust this parameter to satisfy: ${issue.message}`,
+        recommendation: issue.code === 'unrecognized_keys'
+          ? 'Remove parameters not listed in the tool input schema.'
+          : `Use the listed constraints and tool input schema to correct this parameter: ${issue.message}`,
       };
     }),
     issues_truncated: error.issues.length > 10,
@@ -56,7 +51,7 @@ function checkedInput<T extends z.ZodType>(schema: T) {
 }
 
 const recovery: Record<string, string> = {
-  credentials_busy: 'Wait for the current login or refresh to finish, then retry sequentially. Do not start another login or delete an active lock.',
+  credentials_busy: 'Wait for current credential access or login to finish, then retry. If queue waits persist, reduce concurrency or adjust COMICK_TOKEN_QUEUE_TIMEOUT_MS. Do not delete an active lock.',
   rate_limited: 'Wait for retry_after when provided; otherwise back off before retrying. Do not retry in parallel.',
   network_error: 'Retry with backoff. If it persists, check connectivity; do not reconnect solely for a network failure.',
   reconnect_required: 'Use comick_connect to reconnect with user consent, then retry. Never resend old authorization codes or refresh tokens.',

@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { apiRequest, ComickError } from './oauth.js';
+import { apiRequest } from './api.js';
+import { ComickError } from './oauth.js';
 
 const identifier = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const hid = identifier.max(64);
@@ -79,6 +80,11 @@ export const libraryEntryOutput = z.object({ data: z.object({
   titles: z.array(z.object({ title: label, lang: z.string().nullable(), is_default: z.boolean().optional() })).optional(),
   url: z.string().url(),
 }) });
+
+function hasValidProgress(entry: z.infer<typeof libraryEntryOutput>['data']) {
+  const unit = entry.media_type === 'manga' ? 'chapter' : 'episode';
+  return [entry.progress, entry.continue_entry].every(value => value === null || value.unit === unit);
+}
 const compactEntry = libraryEntryOutput.shape.data.pick({
   hid: true, slug: true, title: true, media_type: true, status_name: true,
   progress: true, continue_entry: true, rating: true, last_released_number: true, total_units: true,
@@ -97,8 +103,12 @@ export const libraryOutput = z.object({
 export async function library(input: z.input<typeof librarySchema>) {
   const { detailed, cursor, ...query } = librarySchema.parse(input);
   const response = parse(z.object({ data: z.array(libraryEntryOutput.shape.data).max(query.limit), next_cursor: z.string().nullable() }), await apiRequest('/me/library', { query: { ...query, cursor: cursor ?? undefined } }));
-  if (response.data.some(item => [item.progress, item.continue_entry].some(value => value && value.unit !== (item.media_type === 'manga' ? 'chapter' : 'episode')))) {
+  if (response.data.some(item => !hasValidProgress(item))) {
     throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
+  }
+  if (response.data.some(item => (query.media_type !== undefined && item.media_type !== query.media_type)
+    || (query.status !== undefined && item.status !== query.status))) {
+    throw new ComickError('invalid_response', 'Comick returned library entries that do not match the requested filters.');
   }
   return parse(libraryOutput, { ...response, data: detailed ? response.data : response.data.map(item => libraryIndex.parse(item)) });
 }
@@ -123,8 +133,7 @@ export async function libraryEntry(input: z.input<typeof libraryEntrySchema>) {
   }
   const result = parse(libraryEntryOutput, response);
   if (result.data.hid !== hid) throw new ComickError('invalid_response', 'Comick returned a different library title identity.');
-  const unit = result.data.media_type === 'manga' ? 'chapter' : 'episode';
-  if ([result.data.progress, result.data.continue_entry].some(value => value && value.unit !== unit)) {
+  if (!hasValidProgress(result.data)) {
     throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
   }
   return { data: detailed ? result.data : compactEntry.parse(result.data) };
@@ -157,8 +166,7 @@ export async function librarySave(input: z.input<typeof librarySaveSchema>) {
   const { hid, action, detailed, ...body } = librarySaveSchema.parse(input);
   const raw = await apiRequest(`/me/library/${encodeURIComponent(hid)}`, { method: action === 'upsert' ? 'PUT' : 'PATCH', body });
   const response = libraryEntryOutput.safeParse(raw);
-  if (!response.success || response.data.data.hid !== hid ||
-    [response.data.data.progress, response.data.data.continue_entry].some(value => value && value.unit !== (response.data.data.media_type === 'manga' ? 'chapter' : 'episode'))) {
+  if (!response.success || response.data.data.hid !== hid || !hasValidProgress(response.data.data)) {
     throw new ComickError('write_outcome_unknown', 'The library write returned success but unverified entry data. Read the entry before retrying; do not assume no change.');
   }
   return { data: detailed ? response.data.data : compactEntry.parse(response.data.data) };

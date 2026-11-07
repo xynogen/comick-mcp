@@ -76,9 +76,11 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
   try {
     await mkdir(`${directory}/dist`);
     await copyFile(`${root}dist/oauth.js`, `${directory}/dist/oauth.js`);
-    await copyFile(`${root}dist/catalog.js`, `${directory}/dist/catalog.js`);
+    await copyFile(`${root}dist/integration.js`, `${directory}/dist/integration.js`);
+    await copyFile(`${root}dist/api.js`, `${directory}/dist/api.js`);
     const oauth = await import(pathToFileURL(`${directory}/dist/oauth.js`).href);
-    const catalog = await import(pathToFileURL(`${directory}/dist/catalog.js`).href);
+    const api = await import(pathToFileURL(`${directory}/dist/api.js`).href);
+    const integration = await import(pathToFileURL(`${directory}/dist/integration.js`).href);
     const tokenResponse = (access = 'access-new', refresh = 'refresh-new') => Response.json({
       access_token: access, token_type: 'Bearer', expires_in: 900,
       scope: 'library:read offline_access', refresh_token: refresh,
@@ -132,7 +134,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     const firstCallback = await originalFetch(callback);
     assert.equal(firstCallback.status, 200);
     assert.match(firstCallback.headers.get('content-type'), /text\/html/);
-    assert.match(await firstCallback.text(), /Return to the connection page/);
+    assert.match(await firstCallback.text(), /Return to your MCP client or connection page/);
     await login;
     assert.equal(exchanges, 1);
     await assert.rejects(stat(`${directory}/.comick/tokens.json`), { code: 'ENOENT' });
@@ -175,7 +177,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.match(callbackHtml, /color-scheme: dark/);
       assert.match(callbackHtml, /<html lang="en">/);
       assert.match(callbackHtml, /Authorization received. Sign-in is still in progress./);
-      assert.match(callbackHtml, /href="http:\/\/127\.0\.0\.1:8788\/"/);
+      assert.doesNotMatch(callbackHtml, /href="http:\/\/127\.0\.0\.1:/);
       assert.doesNotMatch(callbackHtml, /test-code|access-new|refresh-new|check the terminal/);
       const connected = await waitForLogin();
       assert.equal(connected.status, 'connected');
@@ -186,7 +188,9 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       const denied = await oauth.connect('start', false);
       callback.search = new URLSearchParams({ state: new URL(denied.authorization_url).searchParams.get('state'), error: 'access_denied' });
       assert.equal((await originalFetch(callback)).status, 400);
-      assert.equal((await waitForLogin()).status, 'failed');
+      const afterDenied = await waitForLogin();
+      assert.equal(afterDenied.status, 'saved');
+      assert.match(afterDenied.last_login_error, /authorization denied/);
       assert.equal(JSON.parse(credential).access_token, 'access-new');
       assert.equal(browserCalls(), platform === 'linux' ? 1 : 0);
       browser.mock.mockImplementation((command, args, options, done) => command === 'secret-tool' || command === 'powershell.exe'
@@ -196,7 +200,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.match(manual.browser_message, /manually/);
       callback.search = new URLSearchParams({ state: new URL(manual.authorization_url).searchParams.get('state'), error: 'access_denied' });
       assert.equal((await originalFetch(callback)).status, 400);
-      assert.equal((await waitForLogin()).status, 'failed');
+      assert.equal((await waitForLogin()).status, 'saved');
     } finally {
       browser.mock.restore();
       syncBuiltinESMExports();
@@ -232,7 +236,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.headers.Authorization, 'Bearer access-new');
       return Response.json({ data: [], next_cursor: null });
     };
-    assert.deepEqual(await oauth.apiRequest('/me/library', { query: { limit: 10, cursor: 'opaque+/=' } }), { data: [], next_cursor: null });
+    assert.deepEqual(await api.apiRequest('/me/library', { query: { limit: 10, cursor: 'opaque+/=' } }), { data: [], next_cursor: null });
     assert.equal(calls.length, 3);
     assert.equal(new URL(calls[0]).searchParams.get('cursor'), 'opaque+/=');
 
@@ -246,10 +250,40 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     keyringFailure = false;
     assert.equal(await oauth.accessToken(), 'access-new');
 
+    const previousWait = process.env.COMICK_TOKEN_QUEUE_TIMEOUT_MS;
+    let releaseRefresh;
+    let refreshStarted;
+    const startedRefresh = new Promise(resolve => { refreshStarted = resolve; });
+    const heldRefresh = new Promise(resolve => { releaseRefresh = resolve; });
+    await store();
+    let queuedRequests = 0;
+    globalThis.fetch = async () => { queuedRequests++; refreshStarted(); return heldRefresh; };
+    const activeRefresh = oauth.accessToken();
+    await startedRefresh;
+    try {
+      process.env.COMICK_TOKEN_QUEUE_TIMEOUT_MS = '5';
+      await assert.rejects(api.apiRequest('/me'), error => error.code === 'credentials_busy' && /Timed out/.test(error.message));
+      releaseRefresh(tokenResponse());
+      assert.equal(await activeRefresh, 'access-new');
+      assert.equal(await oauth.accessToken(), 'access-new', 'Expired queue entries must not block later calls');
+      assert.equal(queuedRequests, 1, 'Expired queued calls must never send a delayed API request');
+      for (const invalid of ['0', '-1', '1.5', 'NaN', '300001']) {
+        process.env.COMICK_TOKEN_QUEUE_TIMEOUT_MS = invalid;
+        await assert.rejects(oauth.accessToken(), error => error.code === 'configuration_required');
+      }
+    } finally {
+      releaseRefresh(tokenResponse());
+      await activeRefresh;
+      if (previousWait === undefined) delete process.env.COMICK_TOKEN_QUEUE_TIMEOUT_MS;
+      else process.env.COMICK_TOKEN_QUEUE_TIMEOUT_MS = previousWait;
+    }
+
     globalThis.fetch = async () => new Response(null, { status: 429, headers: { 'retry-after': '60' } });
-    await assert.rejects(oauth.apiRequest('/me'), /HTTP 429; Retry-After: 60/);
+    await assert.rejects(api.apiRequest('/me'), /HTTP 429; Retry-After: 60/);
     process.env.COMICK_REDIRECT_URI = 'http://0.0.0.0:8787/callback';
     await assert.rejects(oauth.login(), /127\.0\.0\.1/);
+    await assert.rejects(oauth.connect('start', false), /127\.0\.0\.1/);
+    assert.equal((await oauth.connect('status')).status, 'saved');
     await store();
     const beforeFailure = credential;
     storeFailure = true;
@@ -264,6 +298,11 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     await assert.rejects(oauth.accessToken(), /Invalid Comick credentials in OS keyring/);
     credential = undefined;
     await assert.rejects(oauth.accessToken(), /No Comick credentials in OS keyring/);
+    const noSession = await oauth.connect('status');
+    assert.equal(noSession.status, 'failed');
+    assert.match(noSession.message, /127\.0\.0\.1/);
+    await store(Date.now() + 900_000);
+    assert.equal((await oauth.connect('status')).status, 'saved', 'A session saved later must supersede the failed attempt');
     if (platform === 'win32') {
       await store();
       globalThis.fetch = async () => tokenResponse('é'.repeat(2000));
@@ -279,13 +318,13 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.headers.Authorization, 'Bearer access-old');
       return Response.json({ data: { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', description: 'OAuth description' } });
     };
-    const detail = await catalog.title({ hid: 'KnownHid', detailed: true });
+    const detail = await integration.title({ hid: 'KnownHid', detailed: true });
     assert.equal(detail.description, 'OAuth description');
     assert.equal(requested.length, 1);
     globalThis.fetch = async () => new Response(null, { status: 429, headers: { 'retry-after': '15' } });
-    await assert.rejects(catalog.title({ hid: 'KnownHid' }), error => error.code === 'rate_limited' && error.retryAfter === '15');
+    await assert.rejects(integration.title({ hid: 'KnownHid' }), error => error.code === 'rate_limited' && error.retryAfter === '15');
     globalThis.fetch = async () => Response.json({ data: { hid: 'WrongHid', slug: 'wrong-title', title: 'Wrong', media_type: 'manga' } });
-    await assert.rejects(catalog.title({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
+    await assert.rejects(integration.title({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
     globalThis.fetch = async (url, options) => {
       assert.equal(url.pathname, '/integrations/v1/titles');
       assert.equal(url.searchParams.get('q'), 'Known');
@@ -294,10 +333,10 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.headers.Authorization, 'Bearer access-old');
       return Response.json({ data: [{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', private_field: 'DO_NOT_FORWARD' }] });
     };
-    assert.deepEqual((await catalog.search({ query: 'Known' })).items, [{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title' }]);
-    assert.doesNotMatch(JSON.stringify(await catalog.search({ query: 'Known', detailed: true })), /DO_NOT_FORWARD/);
+    assert.deepEqual((await integration.search({ query: 'Known' })).items, [{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title' }]);
+    assert.doesNotMatch(JSON.stringify(await integration.search({ query: 'Known', detailed: true })), /DO_NOT_FORWARD/);
     for (const input of [{ query: 'x' }, { query: 'x'.repeat(101) }, { query: 'Known', limit: 21 }, { query: 'Known', page: 1 }, { query: 'Known', genres: ['action'] }, { q: 'Known' }]) {
-      assert.equal(catalog.searchSchema.safeParse(input).success, false);
+      assert.equal(integration.searchSchema.safeParse(input).success, false);
     }
 
     const entry = { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', status: 1, status_name: 'reading',
@@ -315,7 +354,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.credentials, 'omit');
       return Response.json({ data: entry });
     };
-    const saved = await catalog.libraryEntry({ hid: 'KnownHid' });
+    const saved = await integration.libraryEntry({ hid: 'KnownHid' });
     assert.equal(entryCalls, 1);
     assert.equal(saved.data.progress.number, '12.5');
     assert.equal(saved.data.progress.volume, '0');
@@ -324,14 +363,14 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     assert.equal(saved.data.rating, 8.5);
     assert.doesNotMatch(JSON.stringify(saved), /DO_NOT_FORWARD/);
     assert.equal(saved.data.updated_at, undefined);
-    const complete = await catalog.libraryEntry({ hid: 'KnownHid', detailed: true });
+    const complete = await integration.libraryEntry({ hid: 'KnownHid', detailed: true });
     assert.equal(complete.data.updated_at, entry.updated_at);
     assert.ok(JSON.stringify(saved).length < JSON.stringify(complete).length);
 
     // Writes preserve omitted values and never retry an ambiguous outcome.
     let writes = [];
     globalThis.fetch = async (url, options) => { writes.push(options); return Response.json({ data: entry }); };
-    await assert.rejects(catalog.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_permission_required');
+    await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_permission_required');
     assert.equal(writes.length, 0);
     const readOnlyCredential = credential;
     const grantWrites = () => {
@@ -359,7 +398,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       [{ progress: null, rating: null }, 'PATCH', { progress: null, rating: null }],
       [{ rating: 10 }, 'PATCH', { rating: 10 }],
     ]) {
-      const output = await catalog.librarySave({ hid: 'KnownHid', ...input });
+      const output = await integration.librarySave({ hid: 'KnownHid', ...input });
       assert.deepEqual(writes.at(-1), { method, body });
       assert.equal(output.data.rating, body.rating === undefined ? entry.rating : body.rating);
       assert.doesNotMatch(JSON.stringify(output), /DO_NOT_FORWARD/);
@@ -371,14 +410,14 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       { progress: { number: '' } }, { progress: { number: 'x'.repeat(4096) } }, { user_id: 'Other' },
     ]) {
       const count = writes.length;
-      await assert.rejects(catalog.librarySave({ hid: 'KnownHid', ...input }), error => error.name === 'ZodError');
+      await assert.rejects(integration.librarySave({ hid: 'KnownHid', ...input }), error => error.name === 'ZodError');
       assert.equal(writes.length, count);
     }
     globalThis.fetch = async (_url, options) => {
       assert.deepEqual(JSON.parse(options.body), { progress: { number: '3' } });
       return Response.json({ data: { ...entry, media_type: 'anime', status_name: 'watching', progress: { unit: 'episode', hid: null, number: '3', volume: null }, continue_entry: null } });
     };
-    const animeWrite = await catalog.librarySave({ hid: 'KnownHid', progress: { number: '3' }, detailed: true });
+    const animeWrite = await integration.librarySave({ hid: 'KnownHid', progress: { number: '3' }, detailed: true });
     assert.equal(animeWrite.data.progress.unit, 'episode');
     assert.equal(animeWrite.data.updated_at, entry.updated_at);
     let deleteCalls = 0;
@@ -390,27 +429,27 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.headers['Content-Type'], undefined);
       return new Response(null, { status: 204 });
     };
-    await assert.rejects(catalog.libraryRemove({ hid: 'KnownHid', confirm: false }), error => error.name === 'ZodError');
+    await assert.rejects(integration.libraryRemove({ hid: 'KnownHid', confirm: false }), error => error.name === 'ZodError');
     assert.equal(deleteCalls, 0);
-    for (let i = 0; i < 2; i++) assert.deepEqual(await catalog.libraryRemove({ hid: 'KnownHid', confirm: true }), { hid: 'KnownHid', status: 'removed_or_already_absent' });
+    for (let i = 0; i < 2; i++) assert.deepEqual(await integration.libraryRemove({ hid: 'KnownHid', confirm: true }), { hid: 'KnownHid', status: 'removed_or_already_absent' });
     assert.equal(deleteCalls, 2);
     for (const response of [new Response('bad JSON'), Response.json({ data: { ...entry, hid: 'WrongHid' } }),
       Response.json({ data: { ...entry, progress: { ...entry.progress, unit: 'episode' } } }), new Response(null, { status: 503 })]) {
       let calls = 0;
       globalThis.fetch = async () => { calls++; return response; };
-      await assert.rejects(catalog.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_outcome_unknown');
+      await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_outcome_unknown');
       assert.equal(calls, 1);
     }
     let lostCalls = 0;
     globalThis.fetch = async () => { lostCalls++; throw new Error('DO_NOT_LEAK_TOKEN'); };
-    await assert.rejects(catalog.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_outcome_unknown' && !/DO_NOT_LEAK_TOKEN/.test(error.message));
+    await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_outcome_unknown' && !/DO_NOT_LEAK_TOKEN/.test(error.message));
     assert.equal(lostCalls, 1);
     for (const [status, code] of [[400, 'api_error'], [403, 'write_permission_required'], [404, 'api_error'], [429, 'rate_limited']]) {
       globalThis.fetch = async () => new Response(null, { status, headers: { 'retry-after': '30' } });
-      await assert.rejects(catalog.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === code && error.status === status);
+      await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === code && error.status === status);
     }
     globalThis.fetch = async () => Response.json({ data: entry });
-    await assert.rejects(catalog.libraryRemove({ hid: 'KnownHid', confirm: true }), error => error.code === 'write_outcome_unknown');
+    await assert.rejects(integration.libraryRemove({ hid: 'KnownHid', confirm: true }), error => error.code === 'write_outcome_unknown');
     let refreshWrites = 0;
     globalThis.fetch = async (url, options) => {
       if (String(url).endsWith('/token')) return Response.json({ access_token: 'write-new', token_type: 'Bearer', expires_in: 900, scope: 'library:read library:write', refresh_token: 'write-refresh' });
@@ -420,7 +459,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(options.body, JSON.stringify({ rating: 8 }));
       return Response.json({ data: { ...entry, rating: 8 } });
     };
-    assert.equal((await catalog.librarySave({ hid: 'KnownHid', rating: 8 })).data.rating, 8);
+    assert.equal((await integration.librarySave({ hid: 'KnownHid', rating: 8 })).data.rating, 8);
     assert.equal(refreshWrites, 2);
     grantWrites();
     credential = JSON.stringify({ ...JSON.parse(credential), expires_at: 0 });
@@ -430,7 +469,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       lostScopeRequests++;
       return tokenResponse();
     };
-    await assert.rejects(catalog.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_permission_required');
+    await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_permission_required');
     assert.equal(lostScopeRequests, 1);
     credential = readOnlyCredential;
 
@@ -447,39 +486,55 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.ok(next === null || next === cursor);
       return Response.json({ data: next ? rows.slice(5) : rows.slice(0, 5), next_cursor: next ? null : cursor });
     };
-    const first = await catalog.library({ media_type: 'manga', status: 1 });
+    const first = await integration.library({ media_type: 'manga', status: 1 });
     assert.equal(first.data.length, 5);
     assert.deepEqual(Object.keys(first.data[0]).sort(), ['hid', 'media_type', 'progress', 'slug', 'status_name', 'title']);
-    assert.deepEqual(await catalog.library({ media_type: 'manga', status: 1, cursor: null }), first);
-    const next = await catalog.library({ media_type: 'manga', status: 1, cursor: first.next_cursor });
+    assert.deepEqual(await integration.library({ media_type: 'manga', status: 1, cursor: null }), first);
+    const next = await integration.library({ media_type: 'manga', status: 1, cursor: first.next_cursor });
     assert.equal(next.next_cursor, null);
     assert.deepEqual([...first.data, ...next.data].map(row => row.hid), rows.map(row => row.hid));
-    const fullPage = await catalog.library({ media_type: 'manga', status: 1, detailed: true });
+    const fullPage = await integration.library({ media_type: 'manga', status: 1, detailed: true });
     assert.equal(fullPage.data[0].titles[0].title, 'Alternative 0');
     assert.equal(fullPage.data[0].translation_status, 'ongoing');
     assert.equal(fullPage.data[0].updated_at, entry.updated_at);
     assert.ok(JSON.stringify(first).length < JSON.stringify(fullPage).length);
     assert.doesNotMatch(JSON.stringify(fullPage), /DO_NOT_FORWARD/);
+    for (const input of [{ status: 5 }, { media_type: 'anime' }, { status: 5, detailed: true }, { media_type: 'anime', detailed: true }]) {
+      globalThis.fetch = async () => Response.json({ data: [entry], next_cursor: null });
+      await assert.rejects(integration.library(input), error => error.code === 'invalid_response' && /filters/.test(error.message));
+    }
+    for (const field of ['progress', 'continue_entry']) {
+      const invalid = { ...entry, [field]: { ...entry[field], unit: 'episode' } };
+      globalThis.fetch = async () => Response.json({ data: [invalid], next_cursor: null });
+      await assert.rejects(integration.library({}), error => error.code === 'invalid_response');
+      globalThis.fetch = async () => Response.json({ data: invalid });
+      await assert.rejects(integration.libraryEntry({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
+      const before = credential;
+      credential = JSON.stringify({ ...JSON.parse(credential), scope: 'library:read library:write offline_access' });
+      try {
+        await assert.rejects(integration.librarySave({ hid: 'KnownHid', rating: 8 }), error => error.code === 'write_outcome_unknown');
+      } finally { credential = before; }
+    }
     const publicProfile = { id: '12345678-1234-4123-8123-123456789abc', username: 'Reader', avatar_url: 'https://example.com/avatar' };
     globalThis.fetch = async url => {
       assert.equal(url.pathname, '/integrations/v1/me');
       assert.equal(url.search, '');
       return Response.json({ ...publicProfile, access_token: 'DO_NOT_FORWARD' });
     };
-    assert.deepEqual(await catalog.me({}), { id: publicProfile.id, username: 'Reader' });
-    assert.deepEqual(await catalog.me({ detailed: true }), publicProfile);
+    assert.deepEqual(await integration.me({}), { id: publicProfile.id, username: 'Reader' });
+    assert.deepEqual(await integration.me({ detailed: true }), publicProfile);
     globalThis.fetch = async () => Response.json({ data: [{ ...entry, progress: { ...entry.progress, number: 12 } }], next_cursor: null });
-    await assert.rejects(catalog.library({}), error => error.code === 'invalid_response');
+    await assert.rejects(integration.library({}), error => error.code === 'invalid_response');
     for (const invalid of [{ ...entry, hid: 'Wrong' }, { ...entry, progress: { ...entry.progress, number: 12 } },
       { ...entry, progress: { ...entry.progress, unit: 'episode' } }]) {
       globalThis.fetch = async () => Response.json({ data: invalid });
-      await assert.rejects(catalog.libraryEntry({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
+      await assert.rejects(integration.libraryEntry({ hid: 'KnownHid' }), error => error.code === 'invalid_response');
     }
     globalThis.fetch = async () => Response.json({ data: { ...entry, media_type: 'anime', status_name: 'watching', progress: null, continue_entry: null } });
-    assert.equal((await catalog.libraryEntry({ hid: 'KnownHid' })).data.progress, null);
+    assert.equal((await integration.libraryEntry({ hid: 'KnownHid' })).data.progress, null);
     for (const status of [403, 404, 429]) {
       globalThis.fetch = async () => new Response(null, { status });
-      await assert.rejects(catalog.libraryEntry({ hid: 'KnownHid' }), error => error.status === status && (status !== 404 || error.code === 'library_entry_not_found'));
+      await assert.rejects(integration.libraryEntry({ hid: 'KnownHid' }), error => error.status === status && (status !== 404 || error.code === 'library_entry_not_found'));
     }
 
     const revoked = [];
@@ -619,6 +674,9 @@ test('OAuth-only MCP schemas, validation and missing login', async () => {
     for (const [name, args] of [['comick_search', {}], ['comick_search', { query: 'Known', limit: 21 }], ['comick_search', { query: 'Known', genres: ['action'] }], ['comick_title', { slug: 'sample' }], ['comick_library_remove', { hid: 'Hid' }]]) {
       const response = await client.callTool({ name, arguments: args });
       assert.equal(JSON.parse(response.content[0].text).error.code, 'invalid_input');
+      const failure = JSON.parse(response.content[0].text).error;
+      assert.ok(failure.issues.every(issue => typeof issue.recommendation === 'string'));
+      if (args.limit === 21) assert.equal(failure.issues.find(issue => issue.path[0] === 'limit').expected.maximum, 20);
     }
   } finally { await client.close(); await transport.close(); }
 });
@@ -676,11 +734,11 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    const catalog = await import('./dist/catalog.js');
+    const integration = await import('./dist/integration.js');
     const oauth = await import('./dist/oauth.js');
-    const outputs = { comick_search: catalog.searchOutput, comick_title: catalog.titleResult, comick_me: catalog.meOutput, comick_library: catalog.libraryOutput,
-      comick_library_entry: catalog.libraryEntryResult, comick_library_save: catalog.libraryEntryResult,
-      comick_library_remove: catalog.libraryRemoveOutput, comick_disconnect: oauth.disconnectOutput };
+    const outputs = { comick_search: integration.searchOutput, comick_title: integration.titleResult, comick_me: integration.meOutput, comick_library: integration.libraryOutput,
+      comick_library_entry: integration.libraryEntryResult, comick_library_save: integration.libraryEntryResult,
+      comick_library_remove: integration.libraryRemoveOutput, comick_disconnect: oauth.disconnectOutput };
     assert.deepEqual(cases.map(([name]) => name).sort(), tools.map(tool => tool.name).sort(), 'Every registered tool must have a contract case');
     await t.test('stress: 100 sequential and 100 concurrent OAuth reads recover without retries', async () => {
       const reads = [...titleCases, ...accountCases];
@@ -725,6 +783,15 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
       assert.equal(value.error.retryable, false);
       assert.ok(value.error.issues.some(issue => issue.code === 'unrecognized_keys'));
       assert.deepEqual(await calls(), before);
+    });
+    await t.test('library filters: mismatched upstream entries are rejected over MCP', async () => {
+      const before = (await calls()).length;
+      for (const args of [{ status: 5 }, { media_type: 'anime', detailed: true }]) {
+        const { response, value } = await call('comick_library', args);
+        assert.equal(response.isError, true);
+        assert.equal(value.error.code, 'invalid_response');
+      }
+      assert.equal((await calls()).length - before, 2, 'Invalid responses must not cause retries');
     });
     for (const [name, args, path] of [...titleCases, ...accountCases, ...writeCases]) await t.test(`${name}: stable success and exact request count`, async () => {
       const count = (await calls()).length;

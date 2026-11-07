@@ -107,7 +107,7 @@ const page = `<!doctype html>
       : '';
     const detail = status.message?.startsWith('Comick credentials are busy.')
       ? 'Another sign-in process is still running. Close it and try again.'
-      : status.message;
+      : status.last_login_error ? 'Last sign-in attempt failed: ' + status.last_login_error : status.message;
     message.textContent = 'Status: ' + (states[status.status] || status.status)
       + expiry + (detail ? ' — ' + detail : '');
     start.disabled = status.status === 'pending';
