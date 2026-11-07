@@ -324,33 +324,31 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.equal(credentialSchema.parse(JSON.parse(z.string().parse(credential))).refresh_token, undefined);
     }
     await store(Date.now() + 900_000);
-    const requested = [];
+    const requested: string[] = [];
     globalThis.fetch = async (input, options = {}) => {
       const url = new URL(input instanceof Request ? input.url : input);
       requested.push(String(url));
-      assert.equal(String(url), `${oauth.resource}/titles/KnownHid`);
+      assert.equal(String(url), 'https://api.comick.dev/v1.0/comic/known-title/');
       assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer access-old');
-      return Response.json({ data: { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', description: 'OAuth description' } });
+      return Response.json({ comic: { hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', desc: 'Catalog description', year: null, status: 1, mu_comic_categories: [], md_comic_md_genres: [] } });
     };
-    const detail = await integration.title({ hid: 'KnownHid', detailed: true });
-    assert.equal(detail.description, 'OAuth description');
+    const detail = await integration.title({ slug: 'known-title' });
+    assert.equal(detail.synopsis, 'Catalog description');
     assert.equal(requested.length, 1);
     globalThis.fetch = async () => new Response(null, { status: 429, headers: { 'retry-after': '15' } });
-    await assert.rejects(integration.title({ hid: 'KnownHid' }), error => error instanceof oauth.ComickError && error.code === 'rate_limited' && error.retryAfter === '15');
-    globalThis.fetch = async () => Response.json({ data: { hid: 'WrongHid', slug: 'wrong-title', title: 'Wrong', media_type: 'manga' } });
-    await assert.rejects(integration.title({ hid: 'KnownHid' }), error => error instanceof oauth.ComickError && error.code === 'invalid_response');
+    await assert.rejects(integration.title({ slug: 'known-title' }), error => error instanceof oauth.ComickError && error.code === 'rate_limited' && error.retryAfter === '15');
     globalThis.fetch = async (input, options = {}) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      assert.equal(url.pathname, '/integrations/v1/titles');
+      assert.equal(url.pathname, '/v1.0/search/');
       assert.equal(url.searchParams.get('q'), 'Known');
       assert.equal(url.searchParams.get('limit'), '5');
       assert.equal(url.searchParams.has('query'), false);
       assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer access-old');
-      return Response.json({ data: [{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', private_field: 'DO_NOT_FORWARD' }] });
+      return Response.json([{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title', media_type: 'manga', private_field: 'DO_NOT_FORWARD' }]);
     };
-    assert.deepEqual((await integration.search({ query: 'Known' })).items, [{ hid: 'KnownHid', slug: 'known-title', title: 'Known Title' }]);
-    assert.doesNotMatch(JSON.stringify(await integration.search({ query: 'Known', detailed: true })), /DO_NOT_FORWARD/);
-    for (const input of [{ query: 'x' }, { query: 'x'.repeat(101) }, { query: 'Known', limit: 21 }, { query: 'Known', page: 1 }, { query: 'Known', genres: ['action'] }, { q: 'Known' }]) {
+    assert.equal(required((await integration.search({ query: 'Known' })).items[0]).slug, 'known-title');
+    assert.doesNotMatch(JSON.stringify(await integration.search({ query: 'Known' })), /DO_NOT_FORWARD/);
+    for (const input of [{ query: 'x' }, { query: 'x'.repeat(101) }, { query: 'Known', limit: 21 }, { query: 'Known', page: 51 }, { query: 'Known', genres: ['action'] }, { q: 'Known' }]) {
       assert.equal(integration.searchSchema.safeParse(input).success, false);
     }
 
@@ -407,11 +405,10 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       return Response.json({ data: { ...entry, ...body, progress } });
     };
     for (const [input, method, body] of [
-      [{ action: 'upsert', status: 5 }, 'PUT', { status: 5 }],
-      [{ status: 1, progress: { number: '12.5', volume: '0' }, rating: 8 }, 'PATCH', { status: 1, progress: { number: '12.5', volume: '0' }, rating: 8 }],
-      [{ progress: { hid: 'ChapterHid' } }, 'PATCH', { progress: { hid: 'ChapterHid' } }],
-      [{ progress: { number: '0' } }, 'PATCH', { progress: { number: '0' } }],
-      [{ progress: { number: 'Special', volume: null } }, 'PATCH', { progress: { number: 'Special', volume: null } }],
+      [{ status: 'planned' }, 'PUT', { status: 5 }],
+      [{ status: 'reading', progress: '12.5', rating: 8 }, 'PUT', { status: 1, progress: { number: '12.5' }, rating: 8 }],
+      [{ progress: '0' }, 'PATCH', { progress: { number: '0' } }],
+      [{ progress: 'Special' }, 'PATCH', { progress: { number: 'Special' } }],
       [{ progress: null, rating: null }, 'PATCH', { progress: null, rating: null }],
       [{ rating: 10 }, 'PATCH', { rating: 10 }],
     ] satisfies [Omit<Parameters<typeof integration.librarySave>[0], 'hid'>, string, z.infer<typeof writeBody>][]) {
@@ -435,7 +432,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.deepEqual(writeBody.parse(JSON.parse(z.string().parse(options.body))), { progress: { number: '3' } });
       return Response.json({ data: { ...entry, media_type: 'anime', status_name: 'watching', progress: { unit: 'episode', hid: null, number: '3', volume: null }, continue_entry: null } });
     };
-    const animeWrite = integration.libraryEntryOutput.parse(await integration.librarySave({ hid: 'KnownHid', progress: { number: '3' }, detailed: true }));
+    const animeWrite = integration.libraryEntryOutput.parse(await integration.librarySave({ hid: 'KnownHid', progress: '3', detailed: true }));
     assert.equal(required(animeWrite.data.progress).unit, 'episode');
     assert.equal(animeWrite.data.updated_at, entry.updated_at);
     let deleteCalls = 0;
@@ -508,20 +505,20 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.ok(next === null || next === cursor);
       return Response.json({ data: next ? rows.slice(5) : rows.slice(0, 5), next_cursor: next ? null : cursor });
     };
-    const first = await integration.library({ media_type: 'manga', status: 1 });
+    const first = await integration.library({ media_type: 'manga', status: 'reading' });
     assert.equal(first.data.length, 5);
     assert.deepEqual(Object.keys(required(first.data[0])).sort(), ['hid', 'media_type', 'progress', 'slug', 'status_name', 'title']);
-    assert.deepEqual(await integration.library({ media_type: 'manga', status: 1, cursor: null }), first);
-    const next = await integration.library({ media_type: 'manga', status: 1, cursor: first.next_cursor });
+    assert.deepEqual(await integration.library({ media_type: 'manga', status: 'reading', cursor: null }), first);
+    const next = await integration.library({ media_type: 'manga', status: 'reading', cursor: first.next_cursor });
     assert.equal(next.next_cursor, null);
     assert.deepEqual([...first.data, ...next.data].map(row => row.hid), rows.map(row => row.hid));
-    const fullPage = z.object({ data: z.array(integration.libraryEntryOutput.shape.data) }).parse(await integration.library({ media_type: 'manga', status: 1, detailed: true }));
+    const fullPage = z.object({ data: z.array(integration.libraryEntryOutput.shape.data) }).parse(await integration.library({ media_type: 'manga', status: 'reading', detailed: true }));
     assert.equal(required(required(required(fullPage.data[0]).titles)[0]).title, 'Alternative 0');
     assert.equal(required(fullPage.data[0]).translation_status, 'ongoing');
     assert.equal(required(fullPage.data[0]).updated_at, entry.updated_at);
     assert.ok(JSON.stringify(first).length < JSON.stringify(fullPage).length);
     assert.doesNotMatch(JSON.stringify(fullPage), /DO_NOT_FORWARD/);
-    for (const input of [{ status: 5 }, { media_type: 'anime' }, { status: 5, detailed: true }, { media_type: 'anime', detailed: true }] as const) {
+    for (const input of [{ status: 'planned' }, { media_type: 'anime' }, { status: 'planned', detailed: true }, { media_type: 'anime', detailed: true }] as const) {
       globalThis.fetch = async () => Response.json({ data: [entry], next_cursor: null });
       await assert.rejects(integration.library(input), error => error instanceof oauth.ComickError && error.code === 'invalid_response' && /filters/.test(error.message));
     }
@@ -684,18 +681,17 @@ test('OAuth-only MCP schemas, validation and missing login', async () => {
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ['comick_connect', 'comick_disconnect', 'comick_library', 'comick_library_entry', 'comick_library_remove', 'comick_library_save', 'comick_me', 'comick_search', 'comick_title']);
-    const search = z.object({ required: z.array(z.string()), properties: z.object({ query: z.object({ minLength: z.number(), maxLength: z.number() }), limit: z.object({ maximum: z.number() }), page: z.unknown().optional() }) }).parse(required(tools.find(tool => tool.name === 'comick_search')).inputSchema);
-    assert.deepEqual(search.required, ['query']);
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ['comick_anime_schedule', 'comick_connect', 'comick_disconnect', 'comick_library', 'comick_library_remove', 'comick_library_save', 'comick_me', 'comick_read_review', 'comick_search', 'comick_sources', 'comick_tags', 'comick_title']);
+    const search = z.object({ properties: z.object({ query: z.object({ minLength: z.number(), maxLength: z.number() }), limit: z.object({ maximum: z.number() }), page: z.object({ maximum: z.number() }) }) }).parse(required(tools.find(tool => tool.name === 'comick_search')).inputSchema);
     assert.equal(search.properties.query.minLength, 2);
     assert.equal(search.properties.query.maxLength, 100);
     assert.equal(search.properties.limit.maximum, 20);
-    assert.equal(search.properties.page, undefined);
-    for (const [name, args] of [['comick_search', { query: 'Known' }], ['comick_title', { hid: 'Hid' }], ['comick_me', {}]] satisfies [string, Record<string, unknown>][] ) {
+    assert.equal(search.properties.page.maximum, 50);
+    for (const [name, args] of [['comick_search', { query: 'Known' }], ['comick_title', { slug: 'sample' }], ['comick_tags', { query: 'regression' }], ['comick_sources', { slug: 'sample' }], ['comick_me', {}]] satisfies [string, Record<string, unknown>][] ) {
       const response = await client.callTool({ name, arguments: args });
       assert.equal(failureSchema.parse(JSON.parse(textContent(response))).error.code, 'configuration_required');
     }
-    for (const [name, args] of [['comick_search', {}], ['comick_search', { query: 'Known', limit: 21 }], ['comick_search', { query: 'Known', genres: ['action'] }], ['comick_title', { slug: 'sample' }], ['comick_library_remove', { hid: 'Hid' }]] satisfies [string, Record<string, unknown>][] ) {
+    for (const [name, args] of [['comick_search', {}], ['comick_search', { query: 'Known', limit: 21 }], ['comick_search', { query: 'Known', genres: ['action'] }], ['comick_title', { hid: 'Hid' }], ['comick_library_remove', { hid: 'Hid' }]] satisfies [string, Record<string, unknown>][] ) {
       const response = await client.callTool({ name, arguments: args });
       assert.equal(failureSchema.parse(JSON.parse(textContent(response))).error.code, 'invalid_input');
       const failure = failureSchema.parse(JSON.parse(textContent(response))).error;
@@ -705,7 +701,7 @@ test('OAuth-only MCP schemas, validation and missing login', async () => {
   } finally { await client.close(); await transport.close(); }
 });
 
-test('all 9 OAuth MCP tools: contracts, validation, failures and request effects', async t => {
+test('all 12 OAuth MCP tools: contracts, validation, failures and request effects', async t => {
   const directory = await mkdtemp(`${root}.test-`);
   const scenario = `${directory}/scenario.json`;
   const requests = `${directory}/requests.jsonl`;
@@ -729,7 +725,8 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
   const integration = await import('./src/integration.js');
   const oauth = await import('./src/oauth.js');
   const outputs = { comick_search: integration.searchOutput, comick_title: integration.titleResult, comick_me: integration.meOutput, comick_library: integration.libraryOutput,
-    comick_library_entry: integration.libraryEntryResult, comick_library_save: integration.libraryEntryResult,
+    comick_tags: integration.tagsOutput, comick_sources: integration.sourcesOutput, comick_library_save: integration.libraryEntryResult,
+    comick_read_review: integration.readReviewOutput, comick_anime_schedule: integration.animeScheduleOutput,
     comick_library_remove: integration.libraryRemoveOutput, comick_disconnect: oauth.disconnectOutput,
     comick_connect: z.object({ status: z.string(), authorization_url: z.string().optional(), scope: z.string().optional() }) };
   type ToolName = keyof typeof outputs;
@@ -750,24 +747,138 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
     return { response, value };
   };
   const titleCases: ToolCase[] = [
-    ['comick_search', { query: 'Sample' }, '/integrations/v1/titles'],
-    ['comick_title', { hid: 'Hid' }, '/integrations/v1/titles/Hid'],
+    ['comick_search', { query: 'Sample' }, '/v1.0/search/'],
+    ['comick_title', { slug: 'sample' }, '/v1.0/comic/sample/'],
+    ['comick_read_review', { slug: 'sample' }, '/v1.0/comic/sample/'],
+    ['comick_anime_schedule', {}, '/anime/schedule'],
+    ['comick_tags', { query: 'regression' }, '/category/'],
   ];
   const accountCases: ToolCase[] = [
     ['comick_me', {}, '/integrations/v1/me'],
     ['comick_library', {}, '/integrations/v1/me/library'],
-    ['comick_library_entry', { hid: 'Hid' }, '/integrations/v1/me/library/Hid'],
   ];
   const writeCases: ToolCase[] = [
     ['comick_library_save', { hid: 'Hid', rating: 8 }, '/integrations/v1/me/library/Hid'],
     ['comick_library_remove', { hid: 'Hid', confirm: true }, '/integrations/v1/me/library/Hid'],
   ];
   const cases: [ToolName, Record<string, unknown>, string?][] = [...titleCases, ...accountCases, ...writeCases,
-    ['comick_connect', { action: 'status' }], ['comick_disconnect', {}]];
+    ['comick_sources', { slug: 'sample' }], ['comick_connect', { action: 'status' }], ['comick_disconnect', {}]];
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
     assert.deepEqual(cases.map(([name]) => name).sort(), tools.map(tool => tool.name).sort(), 'Every registered tool must have a contract case');
+    await t.test('all list responses default to 5 and only expand explicitly', async () => {
+      for (const [schema, input] of [
+        [integration.tagsSchema, { query: 'sample' }], [integration.searchSchema, { query: 'sample' }],
+        [integration.titleSchema, { slug: 'sample' }], [integration.sourcesSchema, { slug: 'sample' }],
+        [integration.readReviewSchema, { slug: 'sample' }], [integration.animeScheduleSchema, {}], [integration.librarySchema, {}],
+      ] as const) assert.equal(schema.parse(input).limit, 5);
+      await setMode('many');
+      try {
+        for (const [name, args, keys] of [
+          ['comick_tags', { query: 'sample' }, ['tags']],
+          ['comick_search', { query: 'sample' }, ['items']],
+          ['comick_title', { slug: 'sample' }, ['tags', 'genres']],
+          ['comick_sources', { slug: 'sample' }, ['reading_links', 'groups']],
+          ['comick_read_review', { slug: 'sample' }, ['reviews']],
+          ['comick_anime_schedule', { timezone: 'UTC' }, ['entries']],
+          ['comick_library', {}, ['data']],
+        ] satisfies [ToolName, Record<string, unknown>, string[]][] ) {
+          const { response, value } = await call(name, args);
+          assert.notEqual(response.isError, true, name);
+          const parsed = z.record(z.string(), z.unknown()).parse(value);
+          for (const key of keys) assert.equal(z.array(z.unknown()).parse(parsed[key]).length, 5, `${name}.${key} must default to 5`);
+          const expanded = z.record(z.string(), z.unknown()).parse((await call(name, { ...args, limit: 7 })).value);
+          for (const key of keys) assert.equal(z.array(z.unknown()).parse(expanded[key]).length, 7);
+          if (name !== 'comick_search' && name !== 'comick_library') {
+            const all = z.record(z.string(), z.unknown()).parse((await call(name, { ...args, limit: -1 })).value);
+            for (const key of keys) assert.equal(z.array(z.unknown()).parse(all[key]).length, 8);
+          }
+        }
+      } finally { await setMode('normal'); }
+    });
+    await t.test('reader reviews and timezone-aware anime schedule', async () => {
+      const first = integration.readReviewOutput.parse((await call('comick_read_review', { slug: 'sample', limit: 1 })).value);
+      assert.equal(first.available_count, 2);
+      assert.equal(first.next_offset, 1);
+      assert.equal(required(first.reviews[0]).author, 'Reader');
+      assert.equal(required(first.reviews[0]).rating, 9);
+      assert.equal(required(first.reviews[0]).content, 'Strong characters, slow start.');
+      const second = integration.readReviewOutput.parse((await call('comick_read_review', { slug: 'sample', offset: 1 })).value);
+      assert.equal(required(second.reviews[0]).author, null);
+      assert.equal(second.next_offset, null);
+      const atEnd = integration.readReviewOutput.parse((await call('comick_read_review', { slug: 'sample', offset: 20 })).value);
+      assert.deepEqual(atEnd.reviews, []);
+      const sunday = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'sunday', timezone: 'Asia/Jakarta' })).value);
+      assert.equal(sunday.entries.length, 1);
+      assert.equal(required(sunday.entries[0]).jst_weekday, 'monday');
+      assert.equal(required(sunday.entries[0]).local_weekday, 'sunday');
+      assert.match(required(sunday.entries[0]).local_time, /22:30/);
+      const monday = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'monday', timezone: 'Asia/Tokyo' })).value);
+      assert.equal(monday.entries.length, 1);
+      const filtered = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'all', query: 'second' })).value);
+      assert.equal(required(filtered.entries[0]).slug, 'second-anime');
+      const page = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'all', limit: 1 })).value);
+      assert.equal(page.next_offset, 1);
+      assert.equal(integration.animeScheduleSchema.parse({}).limit, 5);
+      assert.equal(integration.animeScheduleSchema.parse({}).day, 'today');
+      assert.equal(integration.animeScheduleSchema.parse({}).timezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+      const today = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { timezone: 'UTC' })).value);
+      assert.deepEqual(today.entries, [], 'Old dated occurrences must not be shown as today');
+      const all = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'all', limit: -1 })).value);
+      assert.equal(all.entries.length, 2);
+      assert.equal(all.next_offset, null);
+      const filteredAll = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'sunday', timezone: 'Asia/Jakarta', limit: -1 })).value);
+      assert.equal(filteredAll.entries.length, 1, '-1 must preserve the day filter');
+      const offsetAll = integration.animeScheduleOutput.parse((await call('comick_anime_schedule', { day: 'all', offset: 1, limit: -1 })).value);
+      assert.equal(offsetAll.entries.length, 1);
+      for (const limit of [-2, 0, 101, 1.5]) assert.equal(integration.animeScheduleSchema.safeParse({ limit }).success, false);
+      const before = await calls();
+      for (const [name, args] of [['comick_anime_schedule', { timezone: 'not/a-zone' }], ['comick_anime_schedule', { day: 'yesterday' }], ['comick_read_review', { slug: '../bad' }], ['comick_read_review', { slug: 'sample', limit: 21 }]] satisfies [ToolName, Record<string, unknown>][] ) {
+        assert.equal(failureSchema.parse((await call(name, args)).value).error.code, 'invalid_input');
+      }
+      assert.deepEqual(await calls(), before);
+    });
+    await t.test('catalog discovery: tag lookup, AND search, title tags and sources', async () => {
+      const resolved = integration.tagsOutput.parse((await call('comick_tags', { query: 'Regression' })).value);
+      assert.deepEqual(resolved.tags, [{ name: 'Regression', slug: 'regression', comic_count: 10 }]);
+      const count = (await calls()).length;
+      const found = integration.searchOutput.parse((await call('comick_search', { tags: ['regression', 'full-color'], excluded_tags: ['harem'], page: 2, limit: 3 })).value);
+      assert.equal(required(found.items[0]).community_rating, 8.1);
+      const request = required((await calls())[count]);
+      assert.deepEqual(request.query.filter(([key]) => key === 'tags'), [['tags', 'regression'], ['tags', 'full-color']]);
+      assert.deepEqual(request.query.filter(([key]) => key === 'excluded-tags'), [['excluded-tags', 'harem']]);
+      assert.ok(request.query.some(([key, value]) => key === 'page' && value === '2'));
+      const detail = integration.titleResult.parse((await call('comick_title', { slug: 'sample' })).value);
+      assert.equal(detail.synopsis, 'Catalog description');
+      assert.equal(required(detail.tags[0]).slug, 'regression');
+      const beforeSources = (await calls()).length;
+      const result = integration.sourcesOutput.parse((await call('comick_sources', { slug: 'sample', language: 'en' })).value);
+      assert.deepEqual(result.reading_links, [{ url: 'https://example.com/read', language: 'en', kind: 'official_translation' }]);
+      assert.equal(required(result.groups[0]).title, 'Sample Scans');
+      assert.equal(result.scope, 'sources_indexed_by_comick');
+      const sent = (await calls()).slice(beforeSources);
+      assert.deepEqual(sent.map(request => request.path), ['/v1.0/comic/sample/', '/v1.0/comic/Hid/chapters']);
+      assert.deepEqual(required(sent[1]).query, [['lang', 'en'], ['groups', '1']]);
+      await setMode('malformed_groups');
+      const failed = await call('comick_sources', { slug: 'sample' });
+      assert.equal(failed.response.isError, true);
+      assert.equal(failureSchema.parse(failed.value).error.code, 'invalid_response');
+      await setMode('normal');
+      const beforeInvalid = await calls();
+      for (const [name, args] of [
+        ['comick_search', { tags: ['regression'], excluded_tags: ['regression'] }],
+        ['comick_search', { tags: Array(11).fill('regression') }],
+        ['comick_title', { slug: '../private' }],
+        ['comick_sources', { slug: 'sample', language: 'bad/../' }],
+        ['comick_library', { hid: 'Hid', status: 'planned' }],
+        ['comick_library_save', { hid: 'Hid', status: 5 }],
+        ['comick_library_save', { hid: 'Hid', progress: {} }],
+      ] satisfies [ToolName, Record<string, unknown>][] ) {
+        assert.equal(failureSchema.parse((await call(name, args)).value).error.code, 'invalid_input');
+      }
+      assert.deepEqual(await calls(), beforeInvalid);
+    });
     await t.test('stress: 100 sequential and 100 concurrent OAuth reads recover without retries', async () => {
       const reads = [...titleCases, ...accountCases];
       for (const concurrency of [1, 10]) {
@@ -797,7 +908,7 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
         latencies.sort((a, b) => a - b);
         const sent = (await calls()).slice(count);
         assert.equal(sent.length, successes, 'Rejected reads must not send requests; successful reads must not retry');
-        assert.ok(sent.every(request => request.method === 'GET' && request.path.startsWith('/integrations/v1/')));
+        assert.ok(sent.every(request => request.method === 'GET'));
         assert.equal(successes, 100);
         assert.notEqual((await call('comick_me', {})).response.isError, true, 'Credential lock must be released after the burst');
         console.log(JSON.stringify({ stress: 'mock upstream, real MCP transport', concurrency, requests: 100, successes, errors, elapsed_ms: Math.round(elapsed), p50_ms: Math.round(required(latencies[49])), p95_ms: Math.round(required(latencies[94])) }));
@@ -814,7 +925,7 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
     });
     await t.test('library filters: mismatched upstream entries are rejected over MCP', async () => {
       const before = (await calls()).length;
-      for (const args of [{ status: 5 }, { media_type: 'anime', detailed: true }]) {
+      for (const args of [{ status: 'planned' }, { media_type: 'anime', detailed: true }]) {
         const { response, value } = await call('comick_library', args);
         assert.equal(response.isError, true);
         assert.equal(failureSchema.parse(value).error.code, 'invalid_response');
@@ -835,11 +946,10 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
       if (name === 'comick_library_save') assert.deepEqual(required(sent[0]).body, { rating: 8 });
       if (name === 'comick_library_remove') assert.equal(required(sent[0]).body, null);
       if (name === 'comick_search') {
-        assert.deepEqual(integration.searchOutput.parse(first.value).items, [{ hid: 'Hid', slug: 'sample', title: 'Sample' }]);
+        assert.equal(required(integration.searchOutput.parse(first.value).items[0]).slug, 'sample');
         assert.equal(integration.searchOutput.parse(first.value).limit, 5);
       }
       if (name === 'comick_me') assert.deepEqual(first.value, { id: '12345678-1234-4123-8123-123456789abc', username: 'Reader' });
-      if (name === 'comick_library_entry') assert.equal(required(integration.libraryEntryResult.parse(first.value).data.progress).number, '12.5');
     });
     for (const [name, args] of [...titleCases, ...accountCases, ...writeCases]) {
       for (const mode of ['network', 'rate_limit', 'forbidden', 'malformed', 'html']) await t.test(`${name}: ${mode} is safe and repeatable`, async () => {
@@ -872,12 +982,12 @@ test('all 9 OAuth MCP tools: contracts, validation, failures and request effects
     });
     await setMode('normal');
     await t.test('library save: read-back preserves fields and idempotent values', async () => {
-      const before = integration.libraryEntryResult.parse((await call('comick_library_entry', { hid: 'Hid' })).value).data;
-      const args = { hid: 'Hid', action: 'upsert', status: 5, progress: { number: '0', volume: '0' } };
+      const before = integration.libraryEntryResult.parse({ data: required(integration.libraryOutput.parse((await call('comick_library', { hid: 'Hid' })).value).data[0]) }).data;
+      const args = { hid: 'Hid', status: 'planned', progress: '0' };
       const first = await call('comick_library_save', args);
       assert.equal(integration.libraryEntryResult.parse(first.value).data.rating, before.rating);
       assert.deepEqual(first.response, (await call('comick_library_save', args)).response);
-      assert.deepEqual(integration.libraryEntryResult.parse(first.value).data, integration.libraryEntryResult.parse((await call('comick_library_entry', { hid: 'Hid' })).value).data);
+      assert.deepEqual(integration.libraryEntryResult.parse(first.value).data, required(integration.libraryOutput.parse((await call('comick_library', { hid: 'Hid' })).value).data[0]));
       const cleared = await call('comick_library_save', { hid: 'Hid', progress: null, rating: null });
       assert.equal(integration.libraryEntryResult.parse(cleared.value).data.progress, null);
       assert.equal(integration.libraryEntryResult.parse(cleared.value).data.rating, null);

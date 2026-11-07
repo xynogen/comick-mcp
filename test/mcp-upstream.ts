@@ -57,6 +57,45 @@ globalThis.fetch = async (input, options = {}) => {
     assert.equal(method, 'POST');
     return new Response(null, { status: 200 });
   }
+  if (scenario === 'many') {
+    const rows = Array.from({ length: 8 }, (_, i) => ({ hid: `Hid${i}`, slug: `sample-${i}`, title: `Sample ${i}` }));
+    if (url.pathname === '/category/') return Response.json(rows.map(row => ({ ...row, comic_count: 8 })));
+    if (url.pathname === '/v1.0/search/') return Response.json(rows.slice(0, Number(url.searchParams.get('limit'))));
+    if (url.pathname === '/integrations/v1/me/library') return Response.json({ data: rows.slice(0, Number(url.searchParams.get('limit'))).map(row => ({ ...entry, ...row })), next_cursor: 'more' });
+    if (url.pathname === '/v1.0/comic/sample/') return Response.json({ comic: { hid: 'Hid', slug: 'sample', title: 'Sample', media_type: 'manga', desc: 'Plot', year: 2020, status: 1,
+      review_count: 8, reviews: rows.map(row => ({ title: row.title, content: 'Review', rating: '8', created_at: '2026-01-01T00:00:00Z', updated_at: null, identities: null })),
+      mu_comic_categories: rows.map(row => ({ mu_categories: row, score: 1 })),
+      md_comic_md_genres: rows.map(row => ({ md_genres: { name: row.title, slug: row.slug, group: 'Genre' } })),
+      links: { urls: { engtl: rows.map(row => ({ url: `https://example.com/${row.slug}`, lang: 'en' })) } },
+    } });
+    if (url.pathname === '/v1.0/comic/Hid/chapters') return Response.json({ groups: rows.map(row => ({ title: row.title, slug: row.slug, official: false, count: 1 })) });
+    if (url.pathname === '/anime/schedule') return Response.json({ year: 2030, season: 'winter', generatedAt: '2030-01-01T00:00:00Z', entries: rows.map(row => ({ ...row,
+      schedule: { broadcast: 'Tuesdays at 12:00 (JST)', jstWeekday: 'tuesday', jstTime: '12:00', occurrenceAt: '2030-01-01T03:00:00Z' },
+    })) });
+  }
+  if (url.pathname === '/category/' || url.pathname === '/anime/schedule' || url.pathname.startsWith('/v1.0/')) {
+    assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer MOCK_ACCESS');
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.redirect, 'error');
+    if (url.pathname === '/anime/schedule') return Response.json({ year: 2026, season: 'fall', generatedAt: '2026-11-07T12:00:00Z', total: 2, entries: empty ? [] : [
+      { hid: 'AnimeHid', slug: 'sample-anime', title: 'Sample Anime', rating: '8.5', rating_count: 20,
+        schedule: { broadcast: 'Mondays at 00:30 (JST)', jstWeekday: 'monday', jstTime: '00:30', occurrenceAt: '2026-11-08T15:30:00Z' } },
+      { hid: 'AnimeHid2', slug: 'second-anime', title: 'Second Anime', rating: null,
+        schedule: { broadcast: 'Tuesdays at 12:00 (JST)', jstWeekday: 'tuesday', jstTime: '12:00', occurrenceAt: '2026-11-10T03:00:00Z' } },
+    ] });
+    if (url.pathname === '/category/') return Response.json(empty ? [] : [{ title: 'Regression', slug: 'regression', comic_count: 10 }, { title: 'Uncounted', slug: 'uncounted', comic_count: null }]);
+    if (url.pathname === '/v1.0/search/') return Response.json(empty ? [] : [{ hid: 'Hid', slug: 'sample', title: 'Sample', rating: '8.5', bayesian_rating: '8.1', rating_count: 10, private_field: 'DO_NOT_LEAK_TOKEN' }]);
+    if (url.pathname === '/v1.0/comic/sample/') return Response.json({ comic: { hid: 'Hid', slug: 'sample', title: 'Sample', media_type: 'manga', desc: 'Catalog description', year: 2020, status: 1,
+      review_count: empty ? 0 : 2, reviews: empty ? [] : [
+        { title: 'Worth reading', content: 'Strong characters, slow start.', rating: '9', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', identities: { traits: { username: 'Reader', email: 'DO_NOT_LEAK_TOKEN' } } },
+        { title: 'Not for me', content: 'Too much exposition.', rating: '4', created_at: '2026-01-03T00:00:00Z', updated_at: null, identities: null },
+      ],
+      mu_comic_categories: [{ mu_categories: { title: 'Regression', slug: 'regression' }, score: 4 }],
+      md_comic_md_genres: [{ md_genres: { name: 'Action', slug: 'action', group: 'Genre' } }],
+      links: { urls: { engtl: [{ url: 'https://example.com/read', lang: 'en' }] } } } });
+    if (url.pathname === '/v1.0/comic/Hid/chapters' && scenario === 'malformed_groups') return Response.json({ unexpected: true });
+    if (url.pathname === '/v1.0/comic/Hid/chapters') return Response.json({ groups: [{ title: 'Sample Scans', slug: 'sample-scans', official: false, count: 12 }] });
+  }
   if (url.pathname.startsWith('/integrations/v1/')) {
     assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer MOCK_ACCESS');
     assert.equal(options.cache, 'no-store');

@@ -1,13 +1,15 @@
 import { accessToken, ComickError, resource } from './oauth.js';
 
-export async function apiRequest(path: string, { method = 'GET', query = {}, body }: {
+export async function apiRequest(path: string, { method = 'GET', query = {}, body, catalog = false }: {
   method?: 'GET' | 'PUT' | 'PATCH' | 'DELETE';
-  query?: Record<string, string | number | undefined>;
+  query?: Record<string, string | number | readonly string[] | undefined>;
   body?: unknown;
+  catalog?: boolean;
 } = {}) {
-  const url = new URL(`${resource}${path}`);
+  const url = new URL(`${catalog ? 'https://api.comick.dev' : resource}${path}`);
   for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined) url.searchParams.set(key, String(value));
+    if (Array.isArray(value)) for (const item of value) url.searchParams.append(key, item);
+    else if (value !== undefined) url.searchParams.set(key, String(value));
   }
   const writing = method !== 'GET';
   const scope = writing ? 'library:write' : 'library:read';
@@ -17,7 +19,7 @@ export async function apiRequest(path: string, { method = 'GET', query = {}, bod
     try {
       response = await fetch(url, {
         method, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        headers: { Authorization: `Bearer ${token}`, ...(catalog ? { 'User-Agent': 'comick-mcp/0.1.0', Accept: 'application/json' } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         signal: AbortSignal.timeout(20_000),
         redirect: 'error', credentials: 'omit',
         cache: 'no-store',
