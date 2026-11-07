@@ -338,8 +338,8 @@ export async function login(onAuthorize?: (url: string) => void) {
           response.setHeader('Content-Type', 'text/html; charset=utf-8');
           response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
           response.end(`<!doctype html>
-<html lang="id"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#151821"><title>Comick MCP — Izin diterima</title>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#151821"><title>Comick MCP — Authorization received</title>
 <style>
   :root { color-scheme: dark; font: 16px/1.55 system-ui, sans-serif; background: #151821; color: #e6e9f0; }
   body { box-sizing: border-box; min-height: 100vh; min-height: 100svh; max-width: 36rem; margin: 0 auto; padding: 1rem; display: flex; flex-direction: column; justify-content: center; text-align: center; }
@@ -350,8 +350,8 @@ export async function login(onAuthorize?: (url: string) => void) {
   a:focus-visible { outline: 2px solid #a0baff; outline-offset: 3px; }
 </style>
 <h1>Comick MCP</h1>
-<p>Izin diterima. Login masih diproses; kembali ke halaman connect dan klik Reload status untuk memastikan tersambung.</p>
-<a href="${returnUrl}">Kembali ke halaman connect</a>
+<p>Authorization received. Sign-in is still in progress. Return to the connection page and click Reload status to confirm you are connected.</p>
+<a href="${returnUrl}">Return to the connection page</a>
 </html>`);
           accept(codes[0]);
         });

@@ -107,7 +107,7 @@ serveStdio(() => {
   }, query => result(() => me(query)));
 
   server.registerTool('comick_library', {
-    description: 'Read a small library index (5 rows): identity, status and saved progress. Fetch comick_library_entry by HID for selected details, or detailed=true for full rows. Pass next_cursor unchanged with the same filters; null ends paging. Status: 1 reading/watching, 2 completed, 3 on hold, 4 dropped, 5 planned.',
+    description: 'List your library. Call {} for the first 5 entries, with no status filter. Omit cursor on the first call; copy next_cursor unchanged for later pages and stop when null. detailed=true adds full metadata. Status: 1 reading/watching, 2 completed, 3 on hold, 4 dropped, 5 planned.',
     inputSchema: checkedInput(librarySchema), outputSchema: libraryOutput,
     annotations: readOnly,
   }, query => result(() => library(query)));
@@ -150,14 +150,14 @@ serveStdio(() => {
   }, query => result(() => scanlations(query)));
 
   server.registerTool('comick_search', {
-    description: 'Find titles: HID, slug and name only (5 by default). detailed=true adds metadata and external_ids for AniList, MyAnimeList, MangaBaka and MangaUpdates when available; IDs remain opaque strings. Use comick_title for one selected title. For similar works, search by genre/tag slugs without the source title as q, then exclude its HID. Site ratings are not similarity scores. One page, no total.',
+    description: 'Find titles with query, for example {"query":"One Piece"}. Returns 5 titles with HID and slug by default; detailed=true adds metadata and external tracker IDs when available. Omit query to browse by genre/tag filters. For similar works, use genre/tag slugs and exclude the source HID from results; site ratings are not similarity scores. Use comick_title for selected details. One page, no total.',
     inputSchema: checkedInput(searchSchema),
     outputSchema: searchOutput,
     annotations: readOnly,
   }, query => result(() => search(query)));
 
   server.registerTool('comick_filters', {
-    description: 'Find valid genre/theme/format or tag slugs for search. Match q against name/slug, or browse 5 per page. Use total and has_more to request more pages; no login.',
+    description: 'Find genre/theme/format or tag slugs for search. Match query against name/slug, or omit it to browse 5 per page. Use total and has_more for paging; no login.',
     inputSchema: checkedInput(filtersSchema),
     outputSchema: filtersOutput,
     annotations: readOnly,

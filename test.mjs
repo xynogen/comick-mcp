@@ -132,7 +132,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     const firstCallback = await originalFetch(callback);
     assert.equal(firstCallback.status, 200);
     assert.match(firstCallback.headers.get('content-type'), /text\/html/);
-    assert.match(await firstCallback.text(), /Kembali ke halaman connect/);
+    assert.match(await firstCallback.text(), /Return to the connection page/);
     await login;
     assert.equal(exchanges, 1);
     await assert.rejects(stat(`${directory}/.comick/tokens.json`), { code: 'ENOENT' });
@@ -173,7 +173,8 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
       assert.match(callbackResponse.headers.get('content-security-policy'), /default-src 'none'/);
       const callbackHtml = await callbackResponse.text();
       assert.match(callbackHtml, /color-scheme: dark/);
-      assert.match(callbackHtml, /Login masih diproses/);
+      assert.match(callbackHtml, /<html lang="en">/);
+      assert.match(callbackHtml, /Authorization received. Sign-in is still in progress./);
       assert.match(callbackHtml, /href="http:\/\/127\.0\.0\.1:8788\/"/);
       assert.doesNotMatch(callbackHtml, /test-code|access-new|refresh-new|check the terminal/);
       const connected = await waitForLogin();
@@ -429,6 +430,7 @@ for (const platform of ['linux', 'win32']) test(`OAuth PKCE, state, refresh rota
     const first = await catalog.library({ media_type: 'manga', status: 1 });
     assert.equal(first.data.length, 5);
     assert.deepEqual(Object.keys(first.data[0]).sort(), ['hid', 'media_type', 'progress', 'slug', 'status_name', 'title']);
+    assert.deepEqual(await catalog.library({ media_type: 'manga', status: 1, cursor: null }), first);
     const next = await catalog.library({ media_type: 'manga', status: 1, cursor: first.next_cursor });
     assert.equal(next.next_cursor, null);
     assert.deepEqual([...first.data, ...next.data].map(row => row.hid), rows.map(row => row.hid));
@@ -607,7 +609,7 @@ test('catalog filters, repeated query values, anonymous requests and HTTP failur
     assert.deepEqual(await catalogGet('/v1.0/search/', query), [{ slug: 'example', title: 'Example' }]);
     for (const invalid of [{ genres: Array(11).fill('action') }, { page: 51 }, { limit: 51 },
       { minimum: 20, maximum: 10 }, { from: 2025, to: 2000 }, { country: ['../'] },
-      { minimum_rating: 11 }, { content_rating: ['unknown'] }, { q: '  ' }, { token: 'secret' }]) {
+      { minimum_rating: 11 }, { content_rating: ['unknown'] }, { query: '  ' }, { token: 'secret' }]) {
       assert.equal(searchSchema.safeParse(invalid).success, false);
     }
     globalThis.fetch = async () => new Response(null, { status: 429, headers: { 'retry-after': '60' } });
@@ -644,7 +646,7 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
       assert.equal(url.searchParams.has('detailed'), false);
       return Response.json(url.pathname === '/genre/' ? genres : [item]);
     };
-    const page = await search({ q: 'known', synopsis_limit: 100, detailed: true });
+    const page = await search({ query: 'known', synopsis_limit: 100, detailed: true });
     assert.ok(searchOutput.safeParse(page).success);
     assert.equal(page.items[0].title, 'Display Title');
     assert.equal(page.items[0].rating.site_score, 9.19);
@@ -660,11 +662,13 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
     assert.doesNotMatch(JSON.stringify(page), /private-contributor|script|reviews|comic_count/);
     assert.equal('total' in page, false);
     calls = [];
-    const compact = await search({ q: 'known' });
+    const compact = await search({ query: 'known' });
     assert.ok(searchOutput.safeParse(compact).success);
     assert.equal(compact.limit, 5);
     assert.deepEqual(Object.keys(compact.items[0]).sort(), ['hid', 'slug', 'title']);
     assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0]).searchParams.get('q'), 'known');
+    assert.equal(new URL(calls[0]).searchParams.has('query'), false);
     assert.ok(JSON.stringify(compact).length < JSON.stringify(page).length);
     assert.equal('synopsis' in (await search({ synopsis_limit: 0 })).items[0], false);
     assert.ok(calls.some(url => new URL(url).searchParams.get('limit') === '5'));
@@ -687,9 +691,9 @@ test('compact catalog metadata, genre resolution and exact bounded detail fallba
     const allFilters = [];
     for (let page = 1; page <= 3; page++) allFilters.push(...(await filters({ page })).items);
     assert.deepEqual(allFilters.map(item => item.slug), manyGenres.map(item => item.slug));
-    assert.deepEqual((await filters({ q: 'THEME-11' })).items.map(item => item.slug), ['theme-11']);
+    assert.deepEqual((await filters({ query: 'THEME-11' })).items.map(item => item.slug), ['theme-11']);
     assert.equal((await filters({ page: 3 })).has_more, false);
-    assert.deepEqual((await filters({ q: 'missing' })).items, []);
+    assert.deepEqual((await filters({ query: 'missing' })).items, []);
 
     globalThis.fetch = async url => url.pathname === '/genre/' ? new Response(null, { status: 503 }) : Response.json([item]);
     const unresolved = await search({ detailed: true });
@@ -1040,6 +1044,14 @@ test('real MCP stdio handshake, tool listing, validation and missing login', asy
     await client.connect(transport);
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map(tool => tool.name).sort(), ['comick_chapter', 'comick_chapter_images', 'comick_chapters', 'comick_connect', 'comick_disconnect', 'comick_filters', 'comick_library', 'comick_library_entry', 'comick_library_remove', 'comick_library_save', 'comick_me', 'comick_scanlations', 'comick_search', 'comick_title']);
+    for (const name of ['comick_search', 'comick_filters']) {
+      const schema = tools.find(tool => tool.name === name).inputSchema;
+      assert.ok(schema.properties.query);
+      assert.equal(schema.properties.q, undefined);
+    }
+    const libraryInput = tools.find(tool => tool.name === 'comick_library').inputSchema;
+    assert.ok(!libraryInput.required?.includes('cursor'));
+    assert.match(libraryInput.properties.cursor.description, /first page.*next_cursor/);
     assert.ok(tools.filter(tool => !['comick_connect', 'comick_disconnect', 'comick_library_save', 'comick_library_remove'].includes(tool.name)).every(tool => tool.annotations.readOnlyHint));
     for (const name of ['comick_library_save', 'comick_library_remove']) {
       const tool = tools.find(tool => tool.name === name);
@@ -1384,6 +1396,10 @@ test('local connect UI only serves loopback status and same-origin connect', asy
     const html = await page.text();
     assert.equal(page.status, 200);
     assert.match(html, /Connect Comick|Reload status/);
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /Loading status…/);
+    assert.match(html, /After approving access on Comick/);
+    assert.match(html, /Another sign-in process is still running/);
     assert.match(html, /color-scheme:\s*dark/);
     assert.match(html, /focus-visible/);
     assert.match(page.headers.get('content-security-policy'), /script-src 'nonce-/);

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { connect, ComickError } from './oauth.js';
 
 const page = `<!doctype html>
-<html lang="id">
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#151821">
@@ -69,13 +69,13 @@ const page = `<!doctype html>
   p:last-of-type { color: #aeb6c6; margin: 1.5rem 0 0; font-size: .875rem; text-align: center; }
 </style>
 <h1>Comick MCP</h1>
-<p id="message" role="status" aria-live="polite">Memuat status…</p>
+<p id="message" role="status" aria-live="polite">Loading status…</p>
 <p id="actions">
   <button id="reload" type="button">Reload status</button>
   <button id="start" type="button">Connect Comick</button>
 </p>
 <p id="link"></p>
-<p>Setelah izin diberikan di Comick, kembali ke sini dan klik Reload status. Token disimpan di OS keyring, bukan di browser.</p>
+<p>After approving access on Comick, return here and click Reload status. Tokens are stored in your OS keyring, not in your browser.</p>
 <script nonce="NONCE">
   const message = document.getElementById('message');
   const link = document.getElementById('link');
@@ -88,25 +88,25 @@ const page = `<!doctype html>
       cache: 'no-store',
     });
     const body = await response.json();
-    if (!response.ok) throw Error(body.error || 'Permintaan gagal.');
+    if (!response.ok) throw Error(body.error || 'Request failed.');
     return body;
   }
 
   function show(status) {
     const states = {
-      connected: 'Terhubung',
-      saved: 'Terhubung (sesi tersimpan)',
-      disconnected: 'Belum terhubung',
-      pending: 'Menunggu izin Comick',
-      failed: 'Gagal',
+      connected: 'Connected',
+      saved: 'Connected (saved session)',
+      disconnected: 'Not connected',
+      pending: 'Waiting for Comick authorization',
+      failed: 'Failed',
     };
     const expiry = status.expired
       ? status.refresh_available
-        ? ' — token kedaluwarsa; akan diperbarui saat dipakai'
-        : ' — token kedaluwarsa; connect ulang'
+        ? ' — token expired; it will be refreshed when used'
+        : ' — token expired; reconnect'
       : '';
     const detail = status.message?.startsWith('Comick credentials are busy.')
-      ? 'Proses login lain masih berjalan. Tutup proses tersebut lalu coba lagi.'
+      ? 'Another sign-in process is still running. Close it and try again.'
       : status.message;
     message.textContent = 'Status: ' + (states[status.status] || status.status)
       + expiry + (detail ? ' — ' + detail : '');
@@ -120,7 +120,7 @@ const page = `<!doctype html>
         a.href = url.href;
         a.rel = 'noopener noreferrer';
         a.target = '_blank';
-        a.textContent = 'Buka halaman izin Comick';
+        a.textContent = 'Open Comick authorization page';
         link.append(a);
       }
     }
@@ -130,7 +130,7 @@ const page = `<!doctype html>
     try {
       show(await request(path, method));
     } catch (error) {
-      message.textContent = 'Gagal: ' + error.message;
+      message.textContent = 'Failed: ' + error.message;
       start.disabled = false;
     }
   }
@@ -177,7 +177,7 @@ export function createUiServer() {
         response.writeHead(error instanceof ComickError && error.code === 'configuration_required' ? 503 : 500)
           .end(JSON.stringify({ error: error instanceof ComickError
             ? error.code === 'credentials_busy'
-              ? 'Proses login lain masih berjalan. Tutup proses tersebut lalu coba lagi.'
+              ? 'Another sign-in process is still running. Close it and try again.'
               : error.message
             : 'Could not check Comick connection.' }));
       }

@@ -5,7 +5,7 @@ const slugs = (maximum: number) => z.array(z.string().trim().min(1).max(200)).mi
 const contentRating = z.enum(['safe', 'suggestive', 'erotica', 'pornographic']);
 
 export const searchSchema = z.object({
-  q: z.string().trim().min(1).max(200).optional().describe('Title keywords. Omit when browsing similar titles by genre/theme; a source title is not a similarity query.'),
+  query: z.string().trim().min(1).max(200).optional().describe('Title keywords. Omit to browse by filters.'),
   genres: slugs(10).describe('Included genre/theme slugs from comick_filters or comick_title.'),
   excludes: slugs(40).describe('Excluded genre/theme slugs.'),
   tags: slugs(10).describe('Included category slugs from comick_filters or comick_title.'),
@@ -107,7 +107,7 @@ export const searchOutput = z.object({
 });
 export const filtersSchema = z.object({
   kind: z.enum(['genres', 'tags']).default('genres'),
-  q: z.string().trim().min(1).max(200).optional().describe('Match a name or slug; omit to browse.'),
+  query: z.string().trim().min(1).max(200).optional().describe('Match a name or slug; omit to browse.'),
   page: z.number().int().min(1).max(10000).default(1),
   limit: z.number().int().min(1).max(100).default(5),
 }).strict();
@@ -173,11 +173,11 @@ async function genreList(): Promise<GenreWithId[]> {
 }
 
 export async function filters(input: z.input<typeof filtersSchema>) {
-  const { kind, q, page, limit } = filtersSchema.parse(input);
+  const { kind, query, page, limit } = filtersSchema.parse(input);
   const items = kind === 'genres' ? await genreList()
     : parse(z.array(z.object({ title: label, slug: identifier })), await catalogGet('/category/'))
       .map(item => ({ name: item.title, slug: item.slug, group: null }));
-  const matching = q ? items.filter(item => `${item.name} ${item.slug}`.toLowerCase().includes(q.toLowerCase())) : items;
+  const matching = query ? items.filter(item => `${item.name} ${item.slug}`.toLowerCase().includes(query.toLowerCase())) : items;
   return parse(filtersOutput, {
     items: matching.slice((page - 1) * limit, page * limit), page, limit, total: matching.length, has_more: page * limit < matching.length,
   });
@@ -190,8 +190,8 @@ async function resolveGenres(items: RawTitle[], warnings: string[]) {
 }
 
 export async function search(input: z.input<typeof searchSchema>) {
-  const { synopsis_limit, detailed, ...query } = searchSchema.parse(input);
-  const items = parse(z.array(rawTitle).max(query.limit), await catalogGet('/v1.0/search/', query));
+  const { synopsis_limit, detailed, query: keywords, ...query } = searchSchema.parse(input);
+  const items = parse(z.array(rawTitle).max(query.limit), await catalogGet('/v1.0/search/', { ...query, q: keywords }));
   if (items.some(item => item.media_type && item.media_type !== query.media_type)) throw new ComickError('invalid_response', 'Comick returned a different media type.');
   const warnings: string[] = [];
   const genres = detailed ? await resolveGenres(items, warnings) : [];
@@ -304,7 +304,8 @@ const compactEntry = libraryEntryOutput.shape.data.pick({
 export const libraryEntryResult = z.object({ data: z.union([libraryEntryOutput.shape.data, compactEntry]) });
 export const librarySchema = z.object({
   media_type: mediaType.optional(), status: z.number().int().min(1).max(5).optional(),
-  limit: z.number().int().min(1).max(100).default(5), cursor: z.string().min(1).max(8192).optional(),
+  limit: z.number().int().min(1).max(100).default(5),
+  cursor: z.string().min(1).max(8192).nullish().describe('Omit or use null for the first page. For later pages, copy next_cursor from the previous response unchanged. Never invent a cursor.'),
   detailed: z.boolean().default(false).describe('Full row metadata; otherwise use comick_library_entry for one selected HID.'),
 }).strict();
 const libraryIndex = compactEntry.pick({ hid: true, slug: true, title: true, media_type: true, status_name: true, progress: true });
@@ -312,8 +313,8 @@ export const libraryOutput = z.object({
   data: z.array(z.union([libraryEntryOutput.shape.data, libraryIndex])).max(100), next_cursor: z.string().nullable(),
 });
 export async function library(input: z.input<typeof librarySchema>) {
-  const { detailed, ...query } = librarySchema.parse(input);
-  const response = parse(z.object({ data: z.array(libraryEntryOutput.shape.data).max(query.limit), next_cursor: z.string().nullable() }), await apiRequest('/me/library', { query }));
+  const { detailed, cursor, ...query } = librarySchema.parse(input);
+  const response = parse(z.object({ data: z.array(libraryEntryOutput.shape.data).max(query.limit), next_cursor: z.string().nullable() }), await apiRequest('/me/library', { query: { ...query, cursor: cursor ?? undefined } }));
   if (response.data.some(item => [item.progress, item.continue_entry].some(value => value && value.unit !== (item.media_type === 'manga' ? 'chapter' : 'episode')))) {
     throw new ComickError('invalid_response', 'Comick returned progress for a different media type.');
   }
