@@ -2,6 +2,7 @@
   "name": "comick-mcp",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "bin": { "comick-mcp": "dist/index.js" },
   "files": ["dist/"],
   "type": "module",

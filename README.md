@@ -77,4 +77,6 @@ npm test       # builds TypeScript and runs Node tests
 npm run build
 ```
 
-No license has been declared for this repository; do not assume permission to redistribute it.
+## License
+
+[MIT](LICENSE). This license covers this server, not Comick content or third-party services.
