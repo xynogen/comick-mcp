@@ -15,7 +15,9 @@
     "start": "node --env-file-if-exists=.env dist/index.js",
     "login": "node --env-file-if-exists=.env dist/oauth.js",
     "ui": "node --env-file-if-exists=.env dist/ui.js",
-    "test": "npm run build && node --test test.mjs"
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test .test-build/test.js",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.4.0",

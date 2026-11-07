@@ -61,10 +61,10 @@ const recovery: Record<string, string> = {
   write_outcome_unknown: 'Read comick_library_entry for this HID before any retry. The write may already have applied; never claim it failed without changing data. Avoid concurrent writers.',
 };
 
-async function result(request: () => Promise<unknown>) {
+async function result(request: () => Promise<Record<string, unknown>>) {
   try {
     const value = await request();
-    const structuredContent = value as Record<string, unknown>;
+    const structuredContent = value;
     return { structuredContent, content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
   } catch (error) {
     const failure = error instanceof ComickError ? { code: error.code, message: error.message, status: error.status, retry_after: error.retryAfter,

@@ -284,14 +284,15 @@ export async function login(onAuthorize?: (url: string) => void) {
             return;
           }
           const codes = url.searchParams.getAll('code');
+          const code = codes[0];
           const denied = url.searchParams.has('error');
-          if (!denied && (codes.length !== 1 || !codes[0])) {
+          if (!denied && (codes.length !== 1 || !code)) {
             response.writeHead(400).end('Missing or duplicate authorization code.');
             return;
           }
           consumed = true;
           clearTimeout(timer);
-          if (denied) {
+          if (denied || !code) {
             response.writeHead(400).end('Authorization denied.');
             reject(new Error('Comick authorization denied.'));
             return;
@@ -310,7 +311,7 @@ export async function login(onAuthorize?: (url: string) => void) {
 <h1>Comick MCP</h1>
 <p>Authorization received. Sign-in is still in progress. Return to your MCP client or connection page and check the connection status before using Comick tools.</p>
 </html>`);
-          accept(codes[0]);
+          accept(code);
         });
         console.error(`Open this URL in your browser to connect Comick:\n${authorize.href}`);
         try {
@@ -341,10 +342,24 @@ function openBrowser(url: string): Promise<{ browser_opened: boolean; browser_me
   });
 }
 
-let pendingLogin: Promise<void> | undefined;
-let connection: Record<string, unknown> = { status: 'idle' };
+export type ConnectionStatus = {
+  status: 'idle' | 'pending' | 'failed' | 'connected' | 'saved' | 'disconnected';
+  authorization_url?: string;
+  expires_in_seconds?: number;
+  scope?: string;
+  expires_at?: number;
+  expired?: boolean;
+  refresh_available?: boolean;
+  message?: string;
+  last_login_error?: string;
+  browser_opened?: boolean;
+  browser_message?: string;
+};
 
-export async function connect(action: 'start' | 'status', open_browser = true) {
+let pendingLogin: Promise<void> | undefined;
+let connection: ConnectionStatus = { status: 'idle' };
+
+export async function connect(action: 'start' | 'status', open_browser = true): Promise<ConnectionStatus> {
   if (action === 'status') {
     if (connection.status === 'pending') return connection;
     const id = clientId();
@@ -368,8 +383,8 @@ export async function connect(action: 'start' | 'status', open_browser = true) {
     failed(error);
   }).finally(() => { pendingLogin = undefined; });
   await started;
-  if (open_browser) {
-    const browser = await openBrowser(String(connection.authorization_url));
+  if (open_browser && connection.authorization_url) {
+    const browser = await openBrowser(connection.authorization_url);
     if (connection.status === 'pending') connection = { ...connection, ...browser };
   }
   return connection;

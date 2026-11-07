@@ -16,7 +16,7 @@ export async function apiRequest(path: string, { method = 'GET', query = {}, bod
     let response: Response;
     try {
       response = await fetch(url, {
-        method, body: body === undefined ? undefined : JSON.stringify(body),
+        method, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         signal: AbortSignal.timeout(20_000),
         redirect: 'error', credentials: 'omit',

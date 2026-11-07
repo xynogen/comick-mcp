@@ -1,6 +1,9 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { connect, ComickError } from './oauth.js';
+
+const clientScript = readFileSync(new URL('./ui-client.js', import.meta.url), 'utf8');
 
 const page = `<!doctype html>
 <html lang="en">
@@ -76,69 +79,7 @@ const page = `<!doctype html>
 </p>
 <p id="link"></p>
 <p>After approving access on Comick, return here and click Reload status. Tokens are stored in your OS keyring, not in your browser.</p>
-<script nonce="NONCE">
-  const message = document.getElementById('message');
-  const link = document.getElementById('link');
-  const start = document.getElementById('start');
-
-  async function request(path, method = 'GET') {
-    const response = await fetch(path, {
-      method,
-      headers: method === 'POST' ? { 'Content-Type': 'application/json' } : {},
-      cache: 'no-store',
-    });
-    const body = await response.json();
-    if (!response.ok) throw Error(body.error || 'Request failed.');
-    return body;
-  }
-
-  function show(status) {
-    const states = {
-      connected: 'Connected',
-      saved: 'Connected (saved session)',
-      disconnected: 'Not connected',
-      pending: 'Waiting for Comick authorization',
-      failed: 'Failed',
-    };
-    const expiry = status.expired
-      ? status.refresh_available
-        ? ' — token expired; it will be refreshed when used'
-        : ' — token expired; reconnect'
-      : '';
-    const detail = status.message?.startsWith('Comick credentials are busy.')
-      ? 'Another sign-in process is still running. Close it and try again.'
-      : status.last_login_error ? 'Last sign-in attempt failed: ' + status.last_login_error : status.message;
-    message.textContent = 'Status: ' + (states[status.status] || status.status)
-      + expiry + (detail ? ' — ' + detail : '');
-    start.disabled = status.status === 'pending';
-    link.replaceChildren();
-
-    if (status.status === 'pending' && status.authorization_url) {
-      const url = new URL(status.authorization_url);
-      if (url.origin === 'https://comick.dev') {
-        const a = document.createElement('a');
-        a.href = url.href;
-        a.rel = 'noopener noreferrer';
-        a.target = '_blank';
-        a.textContent = 'Open Comick authorization page';
-        link.append(a);
-      }
-    }
-  }
-
-  async function run(path, method) {
-    try {
-      show(await request(path, method));
-    } catch (error) {
-      message.textContent = 'Failed: ' + error.message;
-      start.disabled = false;
-    }
-  }
-
-  document.getElementById('reload').addEventListener('click', () => run('/status'));
-  start.addEventListener('click', () => run('/connect', 'POST'));
-  run('/status');
-</script>
+<script type="module" nonce="NONCE">CLIENT_SCRIPT</script>
 </html>`;
 
 export function createUiServer() {
@@ -159,7 +100,7 @@ export function createUiServer() {
       response.setHeader('Content-Security-Policy',
         `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'`);
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
-      response.end(page.replace('NONCE', nonce));
+      response.end(page.replace('NONCE', nonce).replace('CLIENT_SCRIPT', () => clientScript));
       return;
     }
 
