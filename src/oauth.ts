@@ -209,11 +209,12 @@ export async function hasCredentials() {
   return Boolean(process.env.COMICK_CLIENT_ID?.trim() && await load(clientId()));
 }
 
-export async function accessToken(rejectedToken?: string) {
+export async function accessToken(rejectedToken?: string, requiredScope = 'library:read') {
   return locked(async () => {
     const id = clientId();
     const tokens = await load(id);
     if (!tokens) throw new ComickError('reconnect_required', 'No Comick credentials in OS keyring. Use comick_connect or npm run login first.');
+    if (!tokens.scope.split(' ').includes(requiredScope)) throw new ComickError('write_permission_required', 'library:write was not granted. Enable library writes for the app, then reconnect and explicitly allow writes. Read-only access still works.');
     if (tokens.expires_at > Date.now() + 30_000 && tokens.access_token !== rejectedToken) return tokens.access_token;
     if (!tokens.refresh_token) throw new ComickError('reconnect_required', 'Comick session expired or revoked. Reconnect with npm run login.');
     const { refresh_token, ...withoutRefresh } = tokens;
@@ -221,36 +222,56 @@ export async function accessToken(rejectedToken?: string) {
     await save({ ...withoutRefresh, expires_at: 0 });
     const replacement = await exchange({ grant_type: 'refresh_token', refresh_token }, id);
     await save(replacement);
+    if (!replacement.scope.split(' ').includes(requiredScope)) throw new ComickError('write_permission_required', 'library:write is no longer granted. Reconnect and explicitly allow writes; read-only access still works.');
     return replacement.access_token;
   });
 }
 
-export async function apiGet(path: string, query: Record<string, string | number | undefined> = {}) {
+export async function apiRequest(path: string, { method = 'GET', query = {}, body }: {
+  method?: 'GET' | 'PUT' | 'PATCH' | 'DELETE';
+  query?: Record<string, string | number | undefined>;
+  body?: unknown;
+} = {}) {
   const url = new URL(`${resource}${path}`);
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
-  let token = await accessToken();
+  const writing = method !== 'GET';
+  const scope = writing ? 'library:write' : 'library:read';
+  let token = await accessToken(undefined, scope);
   for (let attempt = 0; attempt < 2; attempt++) {
     let response: Response;
     try {
       response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+        method, body: body === undefined ? undefined : JSON.stringify(body),
+        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         signal: AbortSignal.timeout(20_000),
         redirect: 'error', credentials: 'omit',
         cache: 'no-store',
       });
-    } catch { throw new ComickError('network_error', 'Comick API network unavailable or request timed out.'); }
+    } catch {
+      throw new ComickError(writing ? 'write_outcome_unknown' : 'network_error', writing
+        ? 'The library write may have succeeded, but its response was not received. Read the library entry before retrying; do not assume no change.'
+        : 'Comick API network unavailable or request timed out.');
+    }
     if (response.status === 401 && attempt === 0) {
-      token = await accessToken(token);
+      token = await accessToken(token, scope);
       continue;
     }
     if (!response.ok) {
       const retryAfter = response.headers.get('retry-after');
+      if (writing && response.status >= 500) throw new ComickError('write_outcome_unknown', `Comick returned HTTP ${response.status}; the library write outcome is unknown. Read the entry before retrying.`, response.status, retryAfter ?? undefined);
+      if (writing && response.status === 403) throw new ComickError('write_permission_required', 'Comick refused the library write. Check app write permission, granted library:write scope, and account eligibility; read-only access may still work.', 403);
       throw new ComickError(response.status === 429 ? 'rate_limited' : response.status === 401 ? 'reconnect_required' : 'api_error', `Comick API returned HTTP ${response.status}${retryAfter ? `; Retry-After: ${retryAfter}` : ''}.`, response.status, retryAfter ?? undefined);
     }
+    if (method === 'DELETE') {
+      if (response.status !== 204) throw new ComickError('write_outcome_unknown', 'Comick did not return the documented 204 deletion confirmation. Verify the library before repeating removal.', response.status);
+      return null;
+    }
     try { return await response.json() as unknown; }
-    catch { throw new ComickError('invalid_response', 'Comick API returned invalid JSON.'); }
+    catch { throw new ComickError(writing ? 'write_outcome_unknown' : 'invalid_response', writing
+      ? 'The library write returned success but invalid JSON. Read the entry before retrying.'
+      : 'Comick API returned invalid JSON.'); }
   }
   throw new Error('Comick authorization failed. Reconnect with npm run login.');
 }
@@ -267,7 +288,7 @@ export async function login(onAuthorize?: (url: string) => void) {
     const authorize = new URL(`${issuer}/authorize`);
     authorize.search = new URLSearchParams({
       response_type: 'code', client_id: id, redirect_uri: callback.href,
-      scope: 'library:read offline_access', resource, state,
+      scope: 'library:read library:write offline_access', resource, state,
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
       code_challenge_method: 'S256',
     }).toString();
