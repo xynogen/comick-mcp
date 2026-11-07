@@ -3,9 +3,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { ComickError, connect, disconnect, disconnectOutput } from './oauth.js';
-import { chapters, chaptersOutput, chaptersSchema, filters, filtersOutput, filtersSchema, library, libraryOutput, librarySchema, libraryEntry, libraryEntryResult, libraryEntrySchema, me, meOutput, meSchema, search, searchOutput, searchSchema, title, titleResult, titleSchema } from './catalog.js';
-import { scanlations, scanlationsOutput, scanlationsSchema, librarySave, librarySaveSchema, libraryRemove, libraryRemoveSchema, libraryRemoveOutput } from './catalog.js';
-import { chapterDetail, chapterDetailSchema, chapterDetailOutput, chapterImages, chapterImagesSchema, chapterImagesOutput } from './catalog.js';
+import { library, libraryOutput, librarySchema, libraryEntry, libraryEntryResult, libraryEntrySchema, me, meOutput, meSchema, search, searchOutput, searchSchema, title, titleResult, titleSchema, librarySave, librarySaveSchema, libraryRemove, libraryRemoveSchema, libraryRemoveOutput } from './catalog.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 
@@ -66,7 +64,6 @@ const recovery: Record<string, string> = {
   invalid_response: 'The upstream response is invalid. Do not change valid parameters or assume an empty result; retry later.',
   write_permission_required: 'Enable library writes in the Comick app settings, then use comick_connect to reconnect and explicitly allow writes. Existing read-only tokens cannot gain writes by refreshing.',
   write_outcome_unknown: 'Read comick_library_entry for this HID before any retry. The write may already have applied; never claim it failed without changing data. Avoid concurrent writers.',
-  scanlations_unavailable: 'Use a web search for the title and scanlation groups, then verify publisher or group pages. Do not fabricate group names, reading links, or treat blocked metadata as no releases.',
 };
 
 async function result(request: () => Promise<unknown>) {
@@ -129,42 +126,15 @@ serveStdio(() => {
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   }, query => result(() => libraryRemove(query)));
 
-  server.registerTool('comick_chapters', {
-    description: 'List 5 chapter releases per page; entry_type=episode selects anime episodes. Newest-created first, not highest number or next unread. detailed=true adds volume, dates and group names. lang accepts en,id or pt-br. Exact slug adds Comick chapter page URLs for manga only: these are tracking/navigation pages, not verified external reading links. Episodes have no video or reader images. Same-number releases remain distinct.',
-    inputSchema: checkedInput(chaptersSchema), outputSchema: chaptersOutput, annotations: readOnly,
-  }, query => result(() => chapters(query)));
-
-  server.registerTool('comick_chapter', {
-    description: 'Read one chapter/episode HID: parent title, number, language, credits, next/previous pointers, external reference and title-level source links supplied by Comick. External URLs are returned only when the API supplies an HTTP(S) URL; names, slugs and storage keys are never converted into reading links. Availability and access are not verified. image_count=null means unknown/not applicable; zero means no image records in this response. No account or progress changes.',
-    inputSchema: checkedInput(chapterDetailSchema), outputSchema: chapterDetailOutput, annotations: readOnly,
-  }, query => result(() => chapterDetail(query)));
-
-  server.registerTool('comick_chapter_images', {
-    description: 'Read image metadata from the official chapter get_images endpoint, not image bytes or a download archive. Returns 5 records by default, maximum 50; offset/next_offset slice the full upstream response locally, not upstream pagination. Returns storage keys/dimensions and an HTTP(S) URL only if supplied; never invents CDN URLs. Empty arrays do not prove a reading source is unavailable elsewhere. Episodes have no reader images. No account or progress changes.',
-    inputSchema: checkedInput(chapterImagesSchema), outputSchema: chapterImagesOutput, annotations: readOnly,
-  }, query => result(() => chapterImages(query)));
-
-  server.registerTool('comick_scanlations', {
-    description: 'Read credited scanlation groups directly from the Comick chapter API across N newest-created releases (default 10, maximum 50). Returns group slugs, official/inactive flags when available, counts, languages and latest sampled release. Not highest chapter order; no external reading URLs. Blocked API access returns an error, never an empty list.',
-    inputSchema: checkedInput(scanlationsSchema), outputSchema: scanlationsOutput, annotations: readOnly,
-  }, query => result(() => scanlations(query)));
-
   server.registerTool('comick_search', {
-    description: 'Find titles with query, for example {"query":"One Piece"}. Returns 5 titles with HID and slug by default; detailed=true adds metadata and external tracker IDs when available. Omit query to browse by genre/tag filters. For similar works, use genre/tag slugs and exclude the source HID from results; site ratings are not similarity scores. Use comick_title for selected details. One page, no total.',
+    description: 'Search titles and alternative titles through OAuth. Requires login and library:read. Supply query (2–100 characters); returns 5 HID/slug/title results by default, maximum 20. detailed=true adds metadata and external tracker IDs. No genre/group filters or pagination; refine query for more results.',
     inputSchema: checkedInput(searchSchema),
     outputSchema: searchOutput,
     annotations: readOnly,
   }, query => result(() => search(query)));
 
-  server.registerTool('comick_filters', {
-    description: 'Find genre/theme/format or tag slugs for search. Match query against name/slug, or omit it to browse 5 per page. Use total and has_more for paging; no login.',
-    inputSchema: checkedInput(filtersSchema),
-    outputSchema: filtersOutput,
-    annotations: readOnly,
-  }, query => result(() => filters(query)));
-
   server.registerTool('comick_title', {
-    description: 'Read one title: synopsis, reusable genre/tag slugs and up to 5 community recommendations. source identifies the main data source; partial flags fallback or missing metadata. missing_fields distinguishes unavailable data from known empty arrays. detailed=true adds full metadata, external_ids for tracker matching (null if unavailable) and recommendations. Supply slug and HID from search for authenticated fallback. Recommendations are not similarity scores.',
+    description: 'Read title metadata through OAuth using a title HID from comick_search. Requires library:read. detailed=true adds all supported metadata, including external tracker IDs. Does not provide chapters, images, scanlation groups or recommendations.',
     inputSchema: checkedInput(titleSchema), outputSchema: titleResult,
     annotations: readOnly,
   }, query => result(() => title(query)));

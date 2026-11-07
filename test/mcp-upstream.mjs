@@ -55,6 +55,9 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.pathname.startsWith('/integrations/v1/')) {
     assert.equal(options.headers.Authorization, 'Bearer MOCK_ACCESS');
     assert.equal(options.cache, 'no-store');
+    assert.equal(options.credentials, 'omit');
+    if (url.pathname === '/integrations/v1/titles') return Response.json({ data: empty ? [] : [{ hid: 'Hid', slug: 'sample', title: 'Sample', media_type: url.searchParams.get('media_type'), description: 'OAuth description' }] });
+    if (url.pathname === '/integrations/v1/titles/Hid') return Response.json({ data: { hid: 'Hid', slug: 'sample', title: 'Sample', media_type: 'manga', description: 'OAuth description' } });
     if (url.pathname === '/integrations/v1/me') return Response.json({ id: '12345678-1234-4123-8123-123456789abc', username: 'Reader', avatar_url: null });
     if (url.pathname === '/integrations/v1/me/library') return Response.json({ data: empty ? [] : [saved], next_cursor: null });
     if (url.pathname === '/integrations/v1/me/library/Hid') {
@@ -68,14 +71,5 @@ globalThis.fetch = async (input, options = {}) => {
       return Response.json({ data: saved });
     }
   }
-  assert.equal(method, 'GET', 'Catalog reads must not mutate the account');
-  assert.equal(options.headers, undefined, 'Catalog requests must be anonymous');
-  if (url.pathname === '/genre/') return Response.json(empty ? [] : [{ id: 5, name: 'Action', slug: 'action', group: 'Genre' }]);
-  if (url.pathname === '/category/') return Response.json(empty ? [] : [{ title: 'Magic', slug: 'magic' }]);
-  if (url.pathname === '/v1.0/search/') return Response.json(empty ? [] : [{ hid: 'Hid', slug: 'sample', title: 'Sample', genres: [5], bayesian_rating: '8.5' }]);
-  if (url.pathname === '/v1.0/comic/sample/') return Response.json({ comic: { hid: 'Hid', slug: 'sample', title: 'Sample' } });
-  if (url.pathname === '/v1.0/comic/Hid/chapters') return Response.json({ chapters: empty ? [] : [{ hid: 'ChapterHid', chap: '0', vol: null, title: null, lang: 'en', group_name: ['Group'] }], total: empty ? 0 : 1, limit: Number(url.searchParams.get('limit')) });
-  if (url.pathname === '/chapter/ChapterHid/') return Response.json({ chapter: { hid: 'ChapterHid', entry_type: 'chapter', chap: '0', vol: null, title: null, lang: 'en', external: null, external_type: null, md_images: [], md_comics: { hid: 'Hid', slug: 'sample', title: 'Sample', media_type: 'manga' } } });
-  if (url.pathname === '/chapter/ChapterHid/get_images') return Response.json(empty ? [] : [{ b2key: 'one.jpg', w: 800, h: 1200 }]);
   throw new Error(`Unmocked upstream route: ${method} ${url.pathname}`);
 };

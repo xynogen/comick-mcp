@@ -205,12 +205,9 @@ async function exchange(parameters: Record<string, string>, id: string): Promise
   return { ...tokens, client_id: id, expires_at: Date.now() + expires_in * 1000 };
 }
 
-export async function hasCredentials() {
-  return Boolean(process.env.COMICK_CLIENT_ID?.trim() && await load(clientId()));
-}
-
+let tokenQueue: Promise<unknown> = Promise.resolve();
 export async function accessToken(rejectedToken?: string, requiredScope = 'library:read') {
-  return locked(async () => {
+  const request = tokenQueue.then(() => locked(async () => {
     const id = clientId();
     const tokens = await load(id);
     if (!tokens) throw new ComickError('reconnect_required', 'No Comick credentials in OS keyring. Use comick_connect or npm run login first.');
@@ -224,7 +221,9 @@ export async function accessToken(rejectedToken?: string, requiredScope = 'libra
     await save(replacement);
     if (!replacement.scope.split(' ').includes(requiredScope)) throw new ComickError('write_permission_required', 'library:write is no longer granted. Reconnect and explicitly allow writes; read-only access still works.');
     return replacement.access_token;
-  });
+  }));
+  tokenQueue = request.then(() => undefined, () => undefined);
+  return request;
 }
 
 export async function apiRequest(path: string, { method = 'GET', query = {}, body }: {
